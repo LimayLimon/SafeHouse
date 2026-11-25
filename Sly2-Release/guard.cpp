@@ -655,8 +655,22 @@ LO* PloGuardTargetBase(GUARD* pg);
 // orig: 0x002082D0 (vt slot 88; class 0x3F's 0x14B290)
 LO* PloGuardTarget(GUARD* pg)
 {
-    if (pg->palo->pcls && pg->palo->pcls->PfnOrig(88) == 0x14B290 && !FGuardState(pg, 0x24)) return PloGuardTarget3F(pg);
-    return PloGuardTargetBase(pg);
+    LO* native = pg->palo->pcls && pg->palo->pcls->PfnOrig(88) == 0x14B290 && !FGuardState(pg, 0x24) ? PloGuardTarget3F(pg) : PloGuardTargetBase(pg);
+    if(!FModSlaiOrdinaryGuard(pg->palo)||!pg->pdet||pg->pdet->fNever||FGamePausedForAi())return native;
+    if(pg->ploTarget&&pg->ploTarget->fInWorld&&!FModSlaiGuest(pg->ploTarget))return native; // authored target
+    if(native&&!FModSlaiGuest(native)&&FTargetClass(pg->acid3C4,native))return native;
+    const glm::vec3 pos=PosOf(pg->palo);
+    float best= native ? glm::length(PosOf(native)-pos) : 2500.0f;
+    if(native&&!FModSlaiGuest(native)){auto* e=PdetentryFind(pg->pdet,native);if(!e||e->st!=1)best=2500.0f;}
+    for(int i=0;i<CModGuestsLive();++i)
+    {
+        LO* slai=PloModGuestLive(i);if(!FModSlaiTargetable(slai))continue;
+        const float dist=glm::length(PosOf(slai)-pos);
+        if(dist>2500||dist>best+ (pg->plo38C==slai?200.0f:0.0f))continue;
+        if(NDetectState(pg->pdet,slai,0)!=1)continue;
+        native=slai;best=dist;
+    }
+    return native;
 }
 
 namespace
@@ -852,7 +866,12 @@ void RefreshGuardTargets(GUARD* pg)
         for (int n : {5, 6, 0x17, 7, 0x10, 1, 0x16, 0x2A}) m |= GrfStateBit(n);
         return m;
     }();
-    if (pg->grfState & s_mask) return;
+    if (pg->grfState & s_mask)
+    {
+        // Native target-record visibility must continue to update for Slai during combat.
+        if(FModSlaiGuest(pg->plo38C)) RefreshGuardTargetrec(pg);
+        return;
+    }
     // Slai uses the same generated detector slots as the native class searches. Only ordinary
     // guards get the extra candidate; authored targets, the eight-slot limit and priorities remain intact.
     const bool fSlaiGuard = FModSlaiOrdinaryGuard(pg->palo);

@@ -260,8 +260,8 @@ int NDetectState(DETECTOR* pdet, LO* pso, int k)
         const GUARD* pg = PguardFromLo(owner);
         if (!pg || pg->pdet != pdet) return 0;
     }
-    if (FCidDerivedFrom(pso->Cid(), 0x32) && NPlayerStatus77(pso) == 2) return 0;  // (vt slot 77: knocked out)
-    if (FCidDerivedFrom(pso->Cid(), 0x34) && pme && FCidDerivedFrom(pme->Cid(), 0x46)) return 0;
+    if (!FModSlaiGuest(pso) && FCidDerivedFrom(pso->Cid(), 0x32) && NPlayerStatus77(pso) == 2) return 0;  // (vt slot 77: knocked out)
+    if (!FModSlaiGuest(pso) && FCidDerivedFrom(pso->Cid(), 0x34) && pme && FCidDerivedFrom(pme->Cid(), 0x46)) return 0;
     if (FGamePausedForAi()) return 0;  // (0x20F1B8)
     if (pdet->fNever) return 0;
     // the actors' +0x11AC: unseen while non-zero. No code writes it; the scripts do through option 741 (EOPID 758):

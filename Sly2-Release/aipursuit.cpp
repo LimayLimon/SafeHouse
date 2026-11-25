@@ -204,6 +204,12 @@ void RefreshGuardTargetrec(GUARD* pg)
     TARGETREC* pt = pg->ptarget3CC;
     if (!pt || !pg->pdet) return;
     const DETENTRY* pe = PdetentryFind(pg->pdet, pt->plo);
+    // Slai may be selected by native sight even when the authored detector table is full.
+    if (FModSlaiGuest(pt->plo) && FModSlaiOrdinaryGuard(pg->palo))
+    {
+        if (FModSlaiTargetable(pt->plo) && NDetectState(pg->pdet,pt->plo,0)==1) SetTargetrecTimer(pt,1);
+        return;
+    }
     if (!pe) return;
     if (static const bool s_f = std::getenv("SLY2N_TRECPRINT") != nullptr; s_f && pe->st)
         std::printf("trec t %.3f guard %d target %d det st %d\n", g_clock.t, pg->palo->oid, pt->plo ? pt->plo->oid : -1, pe->st);

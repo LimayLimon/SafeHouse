@@ -29,6 +29,8 @@ const LO* PloModSlaiNamespace(const LO* plo);
 // Independent guest is available to native guard detection only after placement and while alive.
 bool FModSlaiTargetable(const LO* plo);
 bool FModSlaiOrdinaryGuard(const LO* plo);
+inline constexpr int c_nSlaiMaxHP = 150;
+const char* SzModSlaiState(const LO* plo);
 int* PnModSlaiHealth(const LO* plo);
 
 struct CTMSG;

@@ -747,7 +747,7 @@ void StartPlayerCounters(ACTOR* pa, bool fReset)
 {
     if (int* hp = PnModSlaiHealth(pa->palo))
     {
-        SetDmgCapacity(pa, 400);
+        SetDmgCapacity(pa, c_nSlaiMaxHP);
         SetDmgCounter(pa, hp);
         // Slai owns his lifetime: only StepSlai respawns and refills him.
         return;

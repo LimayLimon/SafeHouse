@@ -1167,11 +1167,11 @@ void DrawDebugVis(SW* psw)
                 int* hp=PnModSlaiHealth(o); if(!hp) continue;
                 const glm::vec3 p=PosAloCenter(static_cast<ALO*>(o))+glm::vec3(0,0,105);
                 glm::vec2 c; if(!FProject(p,&c) || c.x<0 || c.x>640 || c.y<25 || c.y>448) continue;
-                const float frac=std::clamp(*hp/400.0f,0.0f,1.0f);
+                const float frac=std::clamp(float(*hp)/c_nSlaiMaxHP,0.0f,1.0f);
                 const float x=c.x-42,y=c.y;
                 g_hud.FillScreenRect(x-1,y-1,x+85,y+8,Col(0x111111),Z_PANEL);
                 if(frac>0) g_hud.FillScreenRect(x,y,x+84*frac,y+7,Col(frac>0.5f?0x53C77D:frac>0.25f?0xE4B94F:0xDA5B56),Z_LINE);
-                const std::string label="Slai  "+std::to_string(*hp)+" / 400 HP";
+                const std::string label="Slai  "+std::to_string(*hp)+" / "+std::to_string(c_nSlaiMaxHP)+" HP · "+SzModSlaiState(o);
                 Text(label,c.x-DxText(label,11)*0.5f,y-15,11,0xFFFFFF);
             }
     }
