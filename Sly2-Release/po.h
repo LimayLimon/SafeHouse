@@ -71,3 +71,5 @@ void ResetPos(SW* psw);                      // a new world's
 int CpoRegistered();                         // orig SW +0x3EB8 (the objects slot 79 ever enabled or disabled)
 const std::vector<LO*>& AploRegistered();    // orig SW +0x3EBC (in the order enabled)
 int UnlockSafeHouseCharacters(SW* psw);   // debug (F6): every character selectable at the safe house (po.cpp)
+
+bool FSlaiSafeHouseOpen();

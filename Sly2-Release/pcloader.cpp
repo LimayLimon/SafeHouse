@@ -9,6 +9,7 @@
 #include "anim.h"
 #include "asega.h"
 #include "bone.h"
+#include "step.h"
 #include "brx.h"
 #include "lo.h"
 #include "shd.h"
@@ -43,6 +44,7 @@ struct KEPT
     SW* psw = nullptr;                       // never freed: its objects are drawn and pointed at until the game ends
     SHDS shds;                               // its textures and shaders (moved out of the game's tables)
     std::unordered_map<const ALO*, std::vector<std::vector<GLOBBONEBIND>>> mpaabind;   // its rest-pose bone bindings
+    std::unordered_map<const ALO*, STEP> mpstep; // retained source floor-probe metadata, no live contact pointers
     SOUNDMGR sound;                          // its music block (its bank's key, its sound table)
     bool fOwnBank = false;                   // its bank is not the running world's: loaded (hbank, loopers in sound)
     uint32_t hbank = 0;
@@ -94,6 +96,7 @@ void Instantiate(KEPT* pk, std::vector<uint8_t> ab)
         if (!FCidDerivedFrom(plo->Cid(), 0x30)) continue;
         const ALO* palo = static_cast<const ALO*>(plo.get());
         if (const auto* paabind = PaabindOfAlo(palo)) pk->mpaabind[palo] = *paabind;
+        if (const STEP* st=PstepFromLo(plo.get())) { STEP snap=*st; snap.pxpFloor=nullptr; pk->mpstep.emplace(palo,snap); }
     }
     // its side tables released (the stashed tables come back below; inside a transition the next load resets them)
     ResetAsegas();
@@ -324,13 +327,20 @@ const std::vector<std::vector<GLOBBONEBIND>>* PaabindKept(const ALO* palo)
     return nullptr;
 }
 
+bool FCopyKeptStep(ALO* dst,const ALO* src)
+{
+    for (const KEPT* pk:s_akept)
+        if(auto it=pk->mpstep.find(src);it!=pk->mpstep.end()) { CopyStep(dst,&it->second); return true; }
+    return false;
+}
+
 SHDS* PshdsKept(int iwrec)
 {
     KEPT* pk = PkFind(iwrec);
     return pk && pk->pckws == PCKWS_Ready ? &pk->shds : nullptr;
 }
 
-LO* PloPcCloneIntoWorld(SW* psw, LO* ptmpl, bool fAdd)
+LO* PloPcCloneIntoWorld(SW* psw, LO* ptmpl, bool fAdd, PFNPCPREPARE pfnPrepare)
 {
     if (!psw || !ptmpl) return nullptr;
     const std::size_t i0 = psw->aploLoad.size();
@@ -344,6 +354,7 @@ LO* PloPcCloneIntoWorld(SW* psw, LO* ptmpl, bool fAdd)
         if (pk->psw && ptmpl->pcls && std::any_of(pk->psw->aploAll.begin(), pk->psw->aploAll.end(), [&](const auto& up) { return up.get() == ptmpl; })) iwrecTmpl = pk->iwrec;
     if (iwrecTmpl >= 0)
         for (LO* p : anew) s_mpcopyiwrec[p] = iwrecTmpl;
+    if (pfnPrepare) pfnPrepare(psw, plo, anew);
     if (s_fWorldStarting) return plo;   // (the world's start starts it with its own objects)
     // the world runs: its start's parts for the new objects alone (StartSw: the records, bone bindings, ASEG / SM tables,
     // then each object's slot-15 start in creation order); its start scripts run with the world's next deferred events

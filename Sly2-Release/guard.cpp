@@ -680,7 +680,7 @@ LO* PloGuardTargetBase(GUARD* pg)
             if (pg->nMode != 0x22 && pg->nMode != 0x25) continue;
             if (!FCidDerivedFrom(cand->Cid(), 0x38)) continue;
         }
-        if (FTargetClass(pg->acid3AC, cand)) continue;
+        if (!FModSlaiGuest(cand) && FTargetClass(pg->acid3AC, cand)) continue;
         if (FTargetClass(pg->acid3C4, cand)) return cand;
         float distance = glm::length(pos - PosOf(cand));
         if (cand == pg->plo38C) distance = -400.0f + distance * 0.8f;  // 0x2C3D70
@@ -893,7 +893,7 @@ void RefreshGuardTargets(GUARD* pg)
             for (int i=0; i<CModGuestsLive(); ++i)
             {
                 LO* other = PloModGuestLive(i);
-                if (!FModSlaiTargetable(other) || other == pg->palo || FTargetClass(pg->acid3AC, other)) continue;
+                if (!FModSlaiTargetable(other) || other == pg->palo) continue;
                 const glm::vec3 delta = PosOf(pg->palo) - PosOf(other);
                 const float distance = std::sqrt(delta.x*delta.x + delta.y*delta.y);
                 if (!(distance < S_TARGET_NEAR) || candidates.size() >= 64) continue;

@@ -3,6 +3,7 @@
 // The world loader (orig 0x13DA18) and the global blocks of a world file.
 
 #include "sw.h"
+#include "modguests.h"
 #include "editrec.h"
 #include "modworld.h"
 #include "worldparts.h"
@@ -166,7 +167,7 @@ LO* PloFindSwObjectByOid(SW* psw, OID oid)
     if (oid == -1) return nullptr;
     LO* ploFirst = nullptr;
     for (LO* plo : AploOfOid(psw, oid))
-        if (plo->oid == oid || plo->oidInstance == oid)
+        if (!PloModSlaiNamespace(plo) && (plo->oid == oid || plo->oidInstance == oid))
         {
             if (FLoInWorldNs(plo) || (plo->oidInstance == oid && FLoAliasInWorldNs(plo))) return plo;
             if (!ploFirst) ploFirst = plo;

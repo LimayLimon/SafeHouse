@@ -708,6 +708,21 @@ void PostLoadSly(SLY* p)
 
 int32_t* PnProgressSlot(const std::vector<std::string>& apath);  // savedata.h (0x1D8C10)
 
+void InitSlaiClone(SW* psw, LO* plo)
+{
+    if (!psw || psw != s_psw || !FModSlaiGuest(plo)) return;
+    if (SLY* p = PslyFromLo(plo))
+    {
+        StepPhysOf(p->palo);
+        InitSlyFields(p);
+        PostLoadActorParts(p);
+        PostLoadActorMass(p);
+        if (p->psma) { RetractSma(p->psma); p->psma = nullptr; }
+        if (p->pasega) RetractAsegaPp(&p->pasega);
+        if (p->pasegaMode) RetractAsegaPp(&p->pasegaMode);
+    }
+}
+
 void InitWorldActors(SW* psw)
 {
     s_psw = psw;
@@ -758,7 +773,7 @@ void CheatRefillPlayers(SW* psw)
     for (const auto& plo : psw->aploAll)
     {
         ACTOR* pa = PactorFromLo(plo.get());
-        if (!pa || !pa->palo) continue;
+        if (!pa || !pa->palo || FModSlaiGuest(pa->palo)) continue;
         const char* psz = FIsLoDerivedFrom(pa->palo, 0x35) ? "sly" : FIsLoDerivedFrom(pa->palo, 0x37) ? "bentley"
                         : FIsLoDerivedFrom(pa->palo, 0x36) ? "murray" : nullptr;
         if (!psz) continue;
@@ -2751,6 +2766,7 @@ void UpdateSlyPhys(ALO* palo)
 // states' own parts)
 void UpdateSlyMotion(ALO* palo)
 {
+    if (FModSlaiGuest(palo)) { UpdateStepPhysMotion(palo); return; }
     SLY* p = PslyFromLo(palo);
     if (!p) { UpdateStepPhysMotion(palo); return; }
     if (p->state == 8 || p->state == 3) ApplyAloGravity(palo);
@@ -2791,6 +2807,7 @@ void UpdateSlyMotion(ALO* palo)
 // orig: 0x0018DEE0 (vt slot 85)
 uint32_t GrfSlyXp(ALO* palo)
 {
+    if (FModSlaiGuest(palo)) return GrfStepXp(palo);
     if (g_pfnGrfSlyXpImported) return g_pfnGrfSlyXpImported(palo);  // (the physics checks: from the reference's RAM)
     SLY* p = PslyFromLo(palo);
     if (!p) return GrfStepXp(palo);

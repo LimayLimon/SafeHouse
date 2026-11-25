@@ -657,3 +657,10 @@ int OidSafeHouseShown(const LO* plo, std::vector<OID>* paoidAllowed)
     if (paoidAllowed) *paoidAllowed = AoidAllowed(plo);
     return OidSmaCur(it->second.psma);
 }
+
+// True while the original character-selection screen is open.
+bool FSlaiSafeHouseOpen()
+{
+    for (const auto& entry : s_mpsh) if (entry.second.nState == 1) return true;
+    return false;
+}

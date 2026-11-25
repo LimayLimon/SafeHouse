@@ -7,6 +7,7 @@
 #include "projectile.h"
 #include "worldglobals.h"
 #include "pccharacter.h"   // (PC addition, debug menu only: Carmelita's shot)
+#include "modguests.h"
 
 #include "activate.h"
 #include "ainoise.h"
@@ -57,6 +58,9 @@ struct PROJ
         ALO* owner = nullptr;
     };
     float tEnd = FLT_MAX;          // +0x154: when the flight ends (0x13B5C8; D_002A4B1C after the end)
+    bool slaiPrevValid = false;
+    glm::vec3 slaiPrev{0.0f};
+    LO* slaiContact = nullptr;
     int fHit = 0;                  // +0x174: the impact recorded (0x13B428)
     glm::vec3 posHit{0.0f};        // +0x180
     glm::mat3 matHit{1.0f};        // +0x190
@@ -185,6 +189,7 @@ std::vector<LO*> AploVictims(ALO* palo, const glm::vec3& pos)
                 std::vector<const void*> apv;
                 if (CsbiSphereEntry(pos, psoe, nullptr, 1, rTest, &apos, &aplane, &akind, &apv) == 0) continue;
             }
+            if (const LO* ns=PloModSlaiNamespace(po)) po=static_cast<ALO*>(const_cast<LO*>(ns));
             if (std::find(apo.begin(), apo.end(), po) == apo.end()) apo.push_back(po);
         }
     }
@@ -209,7 +214,10 @@ void EndProjectile(ALO* palo)
     RecordHit(palo, PosAloCenter(palo), AXIS_Z);
     PROJ& p = Proj(palo);
     if (!UField(palo, 0x164, 0))
-        for (LO* po : AploVictims(palo, p.posHit))
+    {
+        auto victims=AploVictims(palo,p.posHit);
+        if (FModSlaiTargetable(p.slaiContact) && std::find(victims.begin(),victims.end(),p.slaiContact)==victims.end()) victims.push_back(p.slaiContact);
+        for (LO* po : victims)
         {
             CTMSG ctm;
             ctm.ploSender = palo;
@@ -221,8 +229,11 @@ void EndProjectile(ALO* palo)
             if (std::getenv("SLY2N_HITDEBUG"))
                 std::printf("projectile %d hits %d (cid 0x%X): filter 0x%X state %d\n", palo->oid, po->oid, po->Cid(), ctm.grfFilter,
                             ctm.nState);
-            PaloAcceptContact(&ctm);  // 0x1F7598
+            if (FModSlaiGuest(po)) FModSlaiAcceptDamage(po,&ctm);
+            else PaloAcceptContact(&ctm);  // 0x1F7598
         }
+    }
+    p.slaiPrevValid=false; p.slaiContact=nullptr;
     if (STEP* pstep = PstepFromLo(palo)) SetStepPos(pstep, p.posHit - glm::vec3(pstep->vecBase));
     else SetAloPos(palo, p.posHit);
     SetAloRotation(palo, p.matHit);
@@ -308,7 +319,17 @@ void UpdateProjectile(LO* plo)
                     palo->oid, palo->Cid(), static_cast<int>(UField(palo, 0x150, 0)), g_clock.t, Proj(palo).tEnd, pos.x, pos.y, pos.z,
                     v.x, v.y, v.z, GField(palo, 0x158, 0.0f), UField(palo, 0x1F4, 0));
     }
-    if (Proj(palo).tEnd <= g_clock.t || glm::length(VelAloPos(palo)) < GField(palo, 0x158, 0.0f))
+    PROJ& state=Proj(palo);
+    if (FPcCarmProjectile(palo) && palo->fInWorld && !state.fHit && state.tEnd>g_clock.t)
+    {
+        const glm::vec3 current=PosAloCenter(palo);
+        glm::vec3 point(0);
+        if (state.slaiPrevValid)
+            if (LO* target=PloModSlaiShotContact(state.slaiPrev,current,&point))
+            { state.slaiContact=target; RecordHit(palo,point,AXIS_Z); ExpireIn(palo,0.0f); }
+        state.slaiPrev=current; state.slaiPrevValid=true;
+    }
+    if (state.tEnd <= g_clock.t || glm::length(VelAloPos(palo)) < GField(palo, 0x158, 0.0f))
         EndProjectile(palo);
     else if (UField(palo, 0x1F4, 0)) SweepProjectile(palo);
 }
@@ -364,7 +385,7 @@ void ProjectileContacts(ALO* palo)
             {
                 // orig: 0x001C4098 -> 0x001C4080 (controller exists and is not in state -1)
                 PODATA* player = other.paloRoot ? PpodataFromLo(other.paloRoot) : nullptr;
-                f = player && player->ppadctl && player->ppadctl->nControl != -1;
+                f = (player && player->ppadctl && player->ppadctl->nControl != -1) || FModSlaiTargetable(other.paloRoot);
             }
             else if (k == 1) f = other.palo && FStickyProjectileParent(other.palo);
             if (f)
@@ -413,6 +434,7 @@ void ResetProjectileInstance(LO* plo, LO*)
     ALO* palo = static_cast<ALO*>(plo);
     PROJ& p = Proj(palo);
     p.fHit = 0;
+    p.slaiPrevValid=false; p.slaiContact=nullptr;
     p.tEnd = FLT_MAX;
     p.attachment = nullptr;
     SetProjectileLauncher(palo, palo);
@@ -594,6 +616,7 @@ NATIVEFN(0x1B2468, UpdateHomingMissileAccel);
 void SetProjectileLauncher(ALO* palo, LO* plaunch)
 {
     PROJ& p = Proj(palo);
+    p.slaiPrevValid=false; p.slaiContact=nullptr;
     if (p.plaunch == plaunch) return;
     p.plaunch = plaunch;
     RecalcSwOxfFilterForObject(palo);

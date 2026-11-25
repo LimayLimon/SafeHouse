@@ -2,6 +2,7 @@
 #include "envonce.h"
 #include "worldglobals.h"
 #include "update.h"
+#include "modguests.h"
 #include "debugmenu.h"
 #include "debugvis.h"
 #include "rope.h"
@@ -649,7 +650,7 @@ void StartLoadedLo(SW* psw, LO* plo)
         };
         walk(plo);
         EnablePo(psw, plo, 0);
-        QueuePostLoadActorBooty(plo);  // 0x1400B8's posted 0x143BD8 (booty.cpp)
+        if (!FModSlaiGuest(plo)) QueuePostLoadActorBooty(plo);  // NPC never restores the player's carried booty
     }
     // 0x1C8030 (cid 7, the clue bottles): the world's n-th, removed when the save has it collected (the world's
     // key + afClue + n, 0x1C7B18)

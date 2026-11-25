@@ -1,6 +1,7 @@
 // PC addition, not in the original game: the debug menu's guest characters and outfits (pccharacter.h).
 // Nothing here runs unless the debug menu (Debug keys) asks for it.
 #include "pccharacter.h"
+#include "modguests.h"
 #include "pcguard.h"
 #include "pcrc.h"
 #include "pcloader.h"
@@ -941,10 +942,11 @@ LO* PloShotTarget(SW* psw, ALO* palo, float rad)
     const glm::vec2 dir(std::cos(rad), std::sin(rad));
     LO* ploBest = nullptr;
     float gBest = 1e30f;
-    for (CID cid = 0x38; cid <= 0x43; ++cid)
+    for (CID cid = 0x35; cid <= 0x43; ++cid)
         for (LO* plo : psw->mpcidaplo[cid])
         {
-            if (!plo->fInWorld || !FCidDerivedFrom(plo->Cid(), 0x30) || !PguardFromLo(plo)) continue;
+            if (!plo->fInWorld || !FCidDerivedFrom(plo->Cid(), 0x30) ||
+                (FModSlaiGuest(plo) ? !FModSlaiTargetable(plo) : (cid < 0x38 || !PguardFromLo(plo)))) continue;
             const glm::vec3 d = PosAloCenter(static_cast<ALO*>(plo)) - pos;
             const float s = glm::length(glm::vec2(d));
             if (s < 1.0f || s > c_sShotRange || std::fabs(d.z) > 1200.0f) continue;
@@ -971,10 +973,11 @@ void UpdateAim(SW* psw, ALO* palo)
     const float rAspect = g_cm.yScreenRange > 0.0f ? g_cm.xScreenRange / g_cm.yScreenRange : 1.0f;
     const glm::vec2 dirAim(std::cos(s_radAim), std::sin(s_radAim));
     float gBest = 1e30f;
-    for (CID cid = 0x38; cid <= 0x43; ++cid)
+    for (CID cid = 0x35; cid <= 0x43; ++cid)
         for (LO* plo : psw->mpcidaplo[cid])
         {
-            if (!plo->fInWorld || !FCidDerivedFrom(plo->Cid(), 0x30) || !PguardFromLo(plo)) continue;
+            if (!plo->fInWorld || !FCidDerivedFrom(plo->Cid(), 0x30) ||
+                (FModSlaiGuest(plo) ? !FModSlaiTargetable(plo) : (cid < 0x38 || !PguardFromLo(plo)))) continue;
             const glm::vec3 pos = PosAloCenter(static_cast<ALO*>(plo));
             const glm::vec3 d = pos - posPlayer;
             if (glm::length(d) > c_sShotRange || glm::dot(glm::vec2(d), dirAim) <= 0.0f) continue;
@@ -1744,6 +1747,9 @@ void DrawPcCarmCrosshair()
     }
     g_hud.FillScreenRect(c.x - 1.0f, c.y - 1.0f, c.x + 1.0f, c.y + 1.0f, rgba, z);
 }
+
+bool FPcCarmProjectile(const LO* pproj)
+{ return std::find(s_apaloShot.begin(),s_apaloShot.end(),pproj)!=s_apaloShot.end(); }
 
 bool FPcCarmShotHits(const LO* pproj, const LO* po)
 {

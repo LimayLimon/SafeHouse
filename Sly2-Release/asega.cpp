@@ -6,6 +6,8 @@
 // evaluates the spline itself every frame (xf.cpp, mode 5 / 7).
 
 #include "asega.h"
+#include "modguests.h"
+#include "so.h"
 #include "ai.h"
 #include "task.h"
 
@@ -100,7 +102,7 @@ ALO* PaloFind(ASEG* paseg, ALO* palo, OID oid)
 void NotifyAsega(ASEGA* pasega, int msgk)
 {
     AddRefAsega(pasega);
-    if (pasega->palo && g_pfnLoMessage) g_pfnLoMessage(pasega->palo, msgk, pasega);
+    if (pasega->palo && !FModSlaiGuest(pasega->palo) && g_pfnLoMessage) g_pfnLoMessage(pasega->palo, msgk, pasega);
     const std::vector<ASEGALISTENER*> a = pasega->aplistener;
     for (ASEGALISTENER* pl : a) pl->OnAsegaMsg(pasega, msgk);
     ReleaseAsega(pasega);
@@ -111,7 +113,7 @@ void NotifyAsega(ASEGA* pasega, int msgk)
 // E.g. Episode 1's Paris intro (ASEG 123963): Sly runs to the safe house by script while the pad is locked.
 void SetAsegaPause(ASEGA* pasega, int f)
 {
-    if (g_fAsegaEventsMuted) return;
+    if (g_fAsegaEventsMuted || FModSlaiGuest(pasega->palo)) return;
     if (FAsegaRetracted(pasega)) return;
     if (f == pasega->fPause) return;
     if (f) PauseGame(3);
@@ -122,7 +124,7 @@ void SetAsegaPause(ASEGA* pasega, int f)
 void Script(ASEGA* pasega, int k, int n = 0)
 {
     // orig vt slot 3 (0x1331F8) of the ASEGA: its script handler k (2 start, 3 retract, 4 event 12 with its word)
-    if (g_fAsegaEventsMuted) return;   // (PC: a guest puppet's clip, asega.h)
+    if (g_fAsegaEventsMuted || FModSlaiGuest(pasega->palo)) return;   // isolated NPC clip
     if (g_pfnAsegaScript) g_pfnAsegaScript(pasega, k, n);
 }
 
@@ -469,7 +471,7 @@ bool FWrapAsegaTime(ASEGA* pasega, float* pt, float* psvt)
 // orig: 0x00131290
 void FireAsegaEvent(ASEGA* pasega, ASEGEV* pev)
 {
-    if (g_fAsegaEventsMuted) { pasega->t = pev->t; return; }   // (PC: a guest puppet's clip, asega.h)
+    if (g_fAsegaEventsMuted || FModSlaiGuest(pasega->palo)) { pasega->t = pev->t; return; }   // (PC: a guest puppet's clip, asega.h)
     if (static const char* s_sz = std::getenv("SLY2N_ASEGEVOWNER"); s_sz && pasega->palo && pasega->palo->oid == std::atoi(s_sz))  // (debug)
         std::printf("asegevfire t %.3f clip %d owner %d kind %d n %d %d %d %d\n", g_clock.t, pasega->paseg ? pasega->paseg->oid : -1, pasega->palo->oid,
                     pev->kind, pev->an[0], pev->an[1], pev->an[2], pev->an[3]);
@@ -733,6 +735,11 @@ void ApplyAseg(ASEG* paseg, ALO* palo, float t, float svt, int grfapl, ASEGA** p
         if (chn.fDisabled) continue;
         GetAsegChannelTarget(paseg, palo, chn, &po, &pxf);
         if (!pxf) continue;
+        if (FModSlaiGuest(palo))
+        {
+            if (PloModSlaiNamespace(po)!=palo) continue;
+            if (po==palo && (pxf==PxfPos(palo)||pxf==PxfRot(palo))) continue;
+        }
         if (static const char* s_szObj = std::getenv("SLY2N_APPLYOBJ"); s_szObj && po && po->oid == std::atoi(s_szObj))
             std::fprintf(stderr, "applyobj %d: aseg %d on %d t %.3f svt %.3f grf %d kind %d clock %.3f\n", po->oid, paseg->oid, palo ? palo->oid : -1, t, svt,
                          grfapl, pxf->kind, g_clock.t);
@@ -770,6 +777,7 @@ void ApplyAseg(ASEG* paseg, ALO* palo, float t, float svt, int grfapl, ASEGA** p
     for (const ASEGCHG& chg : pasegd->achg)
     {
         LO* plo = palo ? PloFindSwChild(palo, chg.n) : PloFindSwNearest(paseg, chg.n);  // orig 0x130010
+        if(FModSlaiGuest(palo) && PloModSlaiNamespace(plo)!=palo) continue;
         float* pg = plo && g_pfnPgAsegParam ? g_pfnPgAsegParam(plo, chg.kind) : nullptr;  // vt slot 43
         if (!pg) continue;
         pasega->alink.push_back(ASEGAL{chg.ptrkg.get(), pg, plo, chg.kind});
@@ -933,7 +941,7 @@ void RetractAsega(ASEGA* pasega)
     if (FAsegaRetracted(pasega)) return;
     AddRefAsega(pasega);
     std::vector<ASEGEV>& aevEnd = PasegdOf(pasega->paseg)->aaev[2];
-    for (int i = pasega->ieaEnd; i < static_cast<int>(aevEnd.size()); i = ++pasega->ieaEnd)
+    for (int i = pasega->ieaEnd; !FModSlaiGuest(pasega->palo) && i < static_cast<int>(aevEnd.size()); i = ++pasega->ieaEnd)
     {
         aevEnd[i].t = pasega->t;
         FireAsegaEvent(pasega, &aevEnd[i]);

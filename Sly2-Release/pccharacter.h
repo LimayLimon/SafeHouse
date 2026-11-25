@@ -144,6 +144,7 @@ bool FPcCarmCanJump();                              // Cross jumps (guards that 
 bool FPcGuardMoves();                               // the puppet is a guard / boss with its own moves (pcguard.cpp)
 bool FPcCarmCircle(ALO* palo);                      // sly.cpp: Circle with nothing to use: true for her high jump
                                                     // (guards: their special, false)
+bool FPcCarmProjectile(const LO* pproj);
 bool FPcCarmShotHits(const LO* pproj, const LO* po);  // projectile.cpp: her shot does not hit her own player
 // transition.cpp, after the world's load and before its start: her shot's projectiles (clones of the template in her
 // world's file) made in the new world, so they start with it

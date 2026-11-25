@@ -22,6 +22,8 @@ SLY* PslyGlobal();
 // The world's start (after the load, the animation's and the physics' post-loads, transition.cpp): every actor's init
 // (0x13FF70 and the class's: Sly 0x188488) and post-load (0x1400B8 and Sly's 0x188608).
 void InitWorldActors(SW* psw);
+// Initialize just the isolated Sly guest, never reinitialize the real player.
+void InitSlaiClone(SW* psw, LO* plo);
 // Debug (F7): the players' health to capacity and power to 100, every frame while on.
 void CheatRefillPlayers(SW* psw);
 

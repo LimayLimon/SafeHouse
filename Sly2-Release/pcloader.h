@@ -68,6 +68,7 @@ SW* PswKeptWorld(int iwrec);
 LO* PloKeptFind(int iwrec, int oid, CID cidBase = 0);
 const std::vector<std::vector<GLOBBONEBIND>>* PaabindKept(const ALO* palo);
 SHDS* PshdsKept(int iwrec);
+bool FCopyKeptStep(ALO* dst,const ALO* src); // opt-in: Slai restores authored floor-probe indices
 
 // A sound of a kept world (its sound id, in its own bank when that is not the running world's): for a puppet's
 // animation events. The copies' own sounds (PloPcCloneIntoWorld) find their bank by themselves.
@@ -76,7 +77,9 @@ CSnd* PsndNewPcKept(int iwrec, int sfxid);
 
 // A live copy of a kept object (and its children) in the running world, started as a loaded object; fAdd: left in
 // the world, else taken out (RemoveLo) like a proxy's spare. Null if the template is null.
-LO* PloPcCloneIntoWorld(SW* psw, LO* ptmpl, bool fAdd);
+// Optional hook runs after copying but before any native start, for isolated NPCs.
+using PFNPCPREPARE = void (*)(SW*, LO*, const std::vector<LO*>&);
+LO* PloPcCloneIntoWorld(SW* psw, LO* ptmpl, bool fAdd, PFNPCPREPARE pfnPrepare = nullptr);
 // a copy's kept world (-1: not a copy). A copy's emitters draw with its kept world's shaders, and the objects their
 // options name are found among its own copies, then in its kept world near its template (emitter.h's hooks)
 int IwrecOfPcCopy(const LO* plo);

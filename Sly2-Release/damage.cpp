@@ -675,7 +675,8 @@ void InitDamage(ACTOR* pa)
     // the counter: Sly's is the save's health (0x3D4AB0: the save +0x50); TODO(actors) the others' (Bentley's /
     // Murray's post-loads)
     static int s_nCounterNone = 0x28;
-    d.pcount = dynamic_cast<SLY*>(pa) ? reinterpret_cast<int*>(g_gamesave.ab + 0x50) : &s_nCounterNone;
+    if (int* hp = PnModSlaiHealth(pa->palo)) { d.pcount = hp; d.cCapacity = 400; }
+    else d.pcount = dynamic_cast<SLY*>(pa) ? reinterpret_cast<int*>(g_gamesave.ab + 0x50) : &s_nCounterNone;
 }
 
 int* DmgCounterOf(ACTOR* pa) { return Dmg(pa).pcount; }

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <glm/vec3.hpp>
 
 struct SW;
 struct LO;
@@ -24,9 +25,12 @@ LO* PloModGuestLive(int i);
 
 // Opt-in Slai guest; prevent the native player initialization from taking its counters/control.
 bool FModSlaiGuest(const LO* plo);
+const LO* PloModSlaiNamespace(const LO* plo);
 // Independent guest is available to native guard detection only after placement and while alive.
 bool FModSlaiTargetable(const LO* plo);
 int* PnModSlaiHealth(const LO* plo);
 
 struct CTMSG;
 bool FModSlaiAcceptDamage(LO* plo, const CTMSG* hit);
+
+LO* PloModSlaiShotContact(const glm::vec3& a,const glm::vec3& b,glm::vec3* hit);

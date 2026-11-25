@@ -2,6 +2,7 @@
 // (oracle-verified).
 
 #include "bone.h"
+#include "modguests.h"
 #include "worldglobals.h"
 
 #include "animfind.h"
@@ -36,7 +37,8 @@ void BindAloBones(ALO* palo)
         for (size_t j = 0; j < glob.abone.size(); ++j)
         {
             GLOBBONEBIND& b = abind[j];
-            LO* plo = PloFindSwNearest(palo, glob.abone[j].oid);  // orig 0x15E938(G, 4, oid, owner)
+            LO* plo = PloFindSwNearest(palo, glob.abone[j].oid);
+            if (const LO* ns=PloModSlaiNamespace(palo); ns && PloModSlaiNamespace(plo)!=ns) plo=nullptr;  // orig 0x15E938(G, 4, oid, owner)
             if (plo && FCidDerivedFrom(plo->Cid(), 0x30)) b.pxfBone = PxfFindAlo(static_cast<ALO*>(plo), glob.abone[j].ibone);
             if (b.pxfBone)
                 b.matBind = pxfGrp ? InverseAffineMatrix4(b.pxfBone->matWorld) * pxfGrp->matWorld

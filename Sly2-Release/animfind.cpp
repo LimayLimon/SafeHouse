@@ -1,6 +1,7 @@
 // See animfind.h. Specification: Sly2-Reference/Sly2-Release/game/find.cpp (0x15E678, 0x15E3E8; oracle-verified).
 
 #include "animfind.h"
+#include "modguests.h"
 
 #include "sw.h"
 
@@ -53,6 +54,11 @@ int CploFindSwNearest(LO* ploCtx, OID oid, LO** pplo, bool fSameChannel)
     {
         LO* plo = up;
         if (!FOidMatches(plo, oid)) continue;
+        const LO* contextNs=PloModSlaiNamespace(ploCtx);
+        const LO* candidateNs=PloModSlaiNamespace(plo);
+        if (candidateNs && candidateNs!=contextNs) continue;
+        // Shared clips remain available; no cross-character ALO fallback for private guest bones.
+        if (contextNs && !candidateNs && FCidDerivedFrom(plo->Cid(),0x30)) continue;
         if (fSameChannel && ploCtx && ploCtx->ichannel >= 0 && plo->ichannel != ploCtx->ichannel) continue;
         const LO* p = plo;
         int ips = 0;
@@ -101,7 +107,7 @@ LO* PloFindSwAny(OID oid)
     // (the world's namespace first, as PloFindSwObjectByOid: sw.cpp FLoInWorldNs)
     LO* ploFirst = nullptr;
     for (LO* const up : AploOfOid(g_psw, oid))
-        if (FOidMatches(up, oid))
+        if (!PloModSlaiNamespace(up) && FOidMatches(up, oid))
         {
             // A clone can retain a proxy alias inside another instance. Its name
             // is local to that instance, not a global alias (0x15E3E8's node test).
