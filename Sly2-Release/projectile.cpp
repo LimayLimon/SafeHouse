@@ -406,6 +406,13 @@ void ProjectileContacts(ALO* palo)
                     pbest->axpd[0].pos.x, pbest->axpd[0].pos.y, pbest->axpd[0].pos.z, pbest->axpd[0].palo ? pbest->axpd[0].palo->oid : -1,
                     pbest->axpd[1].pos.x, pbest->axpd[1].pos.y, pbest->axpd[1].pos.z, pbest->axpd[1].palo ? pbest->axpd[1].palo->oid : -1,
                     pbest->gDist, pbest->xpk, pos.x, pos.y, pos.z);
+    if (FPcCarmProjectile(palo))
+    {
+        const XPD& other=pbest->axpd[pbest->axpd[0].paloRoot==palo?1:0];
+        const LO* ns=PloModSlaiNamespace(other.paloRoot);
+        if(!ns) ns=PloModSlaiNamespace(other.palo);
+        if(FModSlaiTargetable(ns)) Proj(palo).slaiContact=const_cast<LO*>(ns);
+    }
     RecordHit(palo, pbest->axpd[0].pos, Normal(VelAloPos(palo), glm::vec3(1.0f, 0.0f, 0.0f)));
     ExpireIn(palo, 0.0f);
 }
@@ -616,7 +623,9 @@ NATIVEFN(0x1B2468, UpdateHomingMissileAccel);
 void SetProjectileLauncher(ALO* palo, LO* plaunch)
 {
     PROJ& p = Proj(palo);
-    p.slaiPrevValid=false; p.slaiContact=nullptr;
+    p.slaiPrevValid=FPcCarmProjectile(palo);
+    if(p.slaiPrevValid) p.slaiPrev=PosAloCenter(palo);
+    p.slaiContact=nullptr;
     if (p.plaunch == plaunch) return;
     p.plaunch = plaunch;
     RecalcSwOxfFilterForObject(palo);

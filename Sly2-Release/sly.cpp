@@ -749,7 +749,7 @@ void StartPlayerCounters(ACTOR* pa, bool fReset)
     {
         SetDmgCapacity(pa, 400);
         SetDmgCounter(pa, hp);
-        if (fReset) *hp = 400;
+        // Slai owns his lifetime: only StepSlai respawns and refills him.
         return;
     }
     const char* psz = FIsLoDerivedFrom(pa->palo, 0x35) ? "sly" : FIsLoDerivedFrom(pa->palo, 0x37) ? "bentley"

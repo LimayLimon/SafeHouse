@@ -4,6 +4,7 @@
 // by the hit's kind), and the reaction after one (0x177BA0). See aihit.h.
 
 #include "aihit.h"
+#include "modguests.h"
 #include "rumble.h"
 #include "step.h"
 
@@ -130,7 +131,8 @@ int JOBREACT::Message(int nmsg, void* pv)
         send(0xB, &h);
         return 1;
     }
-    if (pg->nMode == 13 || pg->nMode == 8) h.n <<= 2;
+    const bool slaiHit=FModSlaiGuest(h.psource) && FModSlaiOrdinaryGuard(pg->palo) && h.kind==4 && h.n<0;
+    if (!slaiHit && (pg->nMode == 13 || pg->nMode == 8)) h.n <<= 2;
     if (pg->nMode == 14) SetGuardMode(pg, -1);
     if (pg->f29C) h.n = 0;
     if (pg->f4A4 && msg.k != 0xB && msg.k != 5 && (h.kind == 0x4000 || h.kind == 0x2000))
@@ -257,7 +259,7 @@ int JOBREACT::Message(int nmsg, void* pv)
     {
         pg->n344 = pg->n340;
         const int v = pg->n340;
-        const int d = v > 0 ? -v : h.n;
+        const int d = slaiHit ? h.n : (v > 0 ? -v : h.n);
         int n = pg->n33C + d;
         if (n < 0) n = 0;
         pg->n33C = n;

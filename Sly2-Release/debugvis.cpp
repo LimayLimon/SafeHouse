@@ -2,6 +2,7 @@
 // own primitives, so both renderers and every aspect draw them alike).
 #include "debugvis.h"
 #include "debugmenu.h"
+#include "modguests.h"
 
 #include "activate.h"
 #include "ai.h"
@@ -988,6 +989,9 @@ bool FDebugVis(DEBUGVIS k)
 
 bool FDebugVisAny()
 {
+    if (!std::getenv("SLY2N_SLAIHP_OFF"))
+        for(int i=0;i<CModGuestsLive();++i)
+            if(FModSlaiGuest(PloModGuestLive(i))) return true;
     for (int k = 0; k < DV_Max; ++k)
         if (FDebugVis(DEBUGVIS(k))) return true;
     return false;
@@ -1154,6 +1158,22 @@ void DrawDebugVis(SW* psw)
         if (FDebugVis(DV_Hidden)) DrawHidden(psw);
         if (FDebugVis(DV_Guards)) DrawGuards(psw);
         if (FDebugVis(DV_Labels)) DrawLabels(psw);
+        // Temporary read-only Slai diagnostic HUD. Draw in the same canvas as labels.
+        if(!std::getenv("SLY2N_SLAIHP_OFF"))
+            for(int i=0;i<CModGuestsLive();++i)
+            {
+                LO* o=PloModGuestLive(i);
+                if(!o || !o->fInWorld || o->fRemoved || !FModSlaiGuest(o)) continue;
+                int* hp=PnModSlaiHealth(o); if(!hp) continue;
+                const glm::vec3 p=PosAloCenter(static_cast<ALO*>(o))+glm::vec3(0,0,105);
+                glm::vec2 c; if(!FProject(p,&c) || c.x<0 || c.x>640 || c.y<25 || c.y>448) continue;
+                const float frac=std::clamp(*hp/400.0f,0.0f,1.0f);
+                const float x=c.x-42,y=c.y;
+                g_hud.FillScreenRect(x-1,y-1,x+85,y+8,Col(0x111111),Z_PANEL);
+                if(frac>0) g_hud.FillScreenRect(x,y,x+84*frac,y+7,Col(frac>0.5f?0x53C77D:frac>0.25f?0xE4B94F:0xDA5B56),Z_LINE);
+                const std::string label="Slai  "+std::to_string(*hp)+" / 400 HP";
+                Text(label,c.x-DxText(label,11)*0.5f,y-15,11,0xFFFFFF);
+            }
     }
     if (FDebugVis(DV_Stats)) DrawStats(psw);
     if (FDebugVis(DV_Mission)) DrawMission(psw);

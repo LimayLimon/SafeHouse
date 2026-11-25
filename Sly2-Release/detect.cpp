@@ -256,7 +256,7 @@ int NDetectState(DETECTOR* pdet, LO* pso, int k)
     {
         // Slai cannot trigger standalone mission detectors or special boss/Carmelita scripts.
         LO* owner = pdet->ploOwner;
-        if (!FModSlaiTargetable(pso) || !owner || (owner->Cid()!=0x38 && owner->Cid()!=0x39)) return 0;
+        if (!FModSlaiTargetable(pso) || !owner || !FModSlaiOrdinaryGuard(owner)) return 0;
         const GUARD* pg = PguardFromLo(owner);
         if (!pg || pg->pdet != pdet) return 0;
     }
@@ -267,7 +267,7 @@ int NDetectState(DETECTOR* pdet, LO* pso, int k)
     // the actors' +0x11AC: unseen while non-zero. No code writes it; the scripts do through option 741 (EOPID 758):
     // Ep3's water buckets (95679, Spice Room Recon) set it while a player rides one (their events 5 / 6), so the
     // flashlight guard there does not see him (R16: natively the option had no setter and he was seen)
-    if (FCidDerivedFrom(pso->Cid(), 0x34))
+    if (!FModSlaiGuest(pso) && FCidDerivedFrom(pso->Cid(), 0x34))
         if (const ACTOR* pa = PactorFromLo(pso); pa && pa->n11AC) return 0;
     // (debug: SLY2N_UNSEEN=1 sets it for every player, another value only for the player with that oid, e.g. 7 Sly,
     // as the reference's SLY2_POKE of 2E1E40@+11AC=1 does, for tests near guards without a job failure)
@@ -326,7 +326,7 @@ int NDetectState(DETECTOR* pdet, LO* pso, int k)
                     }
         if (!FInsideShape(pdet->ploVolume, pos)) return 0;
         if (pdet->ploVolume2 && !FInsideShape(pdet->ploVolume2, pos)) return 0;
-        if (!(pdet->grf & 1) && FTargetHidden(pdet, pso)) return 0;
+        if (!(pdet->grf & 1) && !FModSlaiGuest(pso) && FTargetHidden(pdet, pso)) return 0;
         if (pdet->grf & 2) return 1;
         return FSightBlocked(pdet, pso) ? 0 : 1;
     case 1:

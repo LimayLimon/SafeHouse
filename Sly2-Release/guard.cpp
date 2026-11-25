@@ -665,7 +665,7 @@ LO* PloGuardTargetBase(GUARD* pg)
 {
     LO* cur = pg->ploTarget;
     if (cur && cur->fInWorld && !FModSlaiGuest(cur)) return cur;
-    const bool fSlaiGuard = pg->palo->Cid() == 0x38 || pg->palo->Cid() == 0x39;
+    const bool fSlaiGuard = FModSlaiOrdinaryGuard(pg->palo);
     LO* best = nullptr;
     float bestDistance = FLT_MAX;
     if (!pg->pdet) return nullptr;
@@ -855,7 +855,7 @@ void RefreshGuardTargets(GUARD* pg)
     if (pg->grfState & s_mask) return;
     // Slai uses the same generated detector slots as the native class searches. Only ordinary
     // guards get the extra candidate; authored targets, the eight-slot limit and priorities remain intact.
-    const bool fSlaiGuard = pg->palo->Cid() == 0x38 || pg->palo->Cid() == 0x39;
+    const bool fSlaiGuard = FModSlaiOrdinaryGuard(pg->palo);
     bool fSlaiPresent = false;
     if (fSlaiGuard)
         for (int i=0; i<CModGuestsLive(); ++i)
@@ -895,8 +895,8 @@ void RefreshGuardTargets(GUARD* pg)
                 LO* other = PloModGuestLive(i);
                 if (!FModSlaiTargetable(other) || other == pg->palo) continue;
                 const glm::vec3 delta = PosOf(pg->palo) - PosOf(other);
-                const float distance = std::sqrt(delta.x*delta.x + delta.y*delta.y);
-                if (!(distance < S_TARGET_NEAR) || candidates.size() >= 64) continue;
+                const float distance = glm::length(delta);
+                if (!(distance < 2500.0f)) continue;
                 bool authored = false;
                 CANDIDATE candidate{distance, other, -1, 0.0f};
                 for (size_t j=0; j<pg->pdet->ae.size(); ++j)
@@ -910,7 +910,17 @@ void RefreshGuardTargets(GUARD* pg)
             }
         // orig: 0x002068D8 comparator, passed to 0x2338C0. Equal-distance
         // ordering depends on the sort implementation and is not a parity claim.
-        std::qsort(candidates.data(), candidates.size(), sizeof(CANDIDATE), [](const void* a, const void* b) {
+        if (fSlaiPresent)
+        {
+            // Reserve the first generated slot for a nearby live Slai; visibility is still tested.
+            // Authored detector entries and forced mission targets are never displaced.
+            std::stable_sort(candidates.begin(),candidates.end(),[&](const CANDIDATE& a,const CANDIDATE& b) {
+                const bool sa=FModSlaiTargetable(a.plo), sb=FModSlaiTargetable(b.plo);
+                if(sa!=sb) return sa;
+                return a.distance<b.distance;
+            });
+        }
+        else std::qsort(candidates.data(), candidates.size(), sizeof(CANDIDATE), [](const void* a, const void* b) {
             return static_cast<const CANDIDATE*>(a)->distance < static_cast<const CANDIDATE*>(b)->distance ? -1 : 1;
         });
         pg->pdet->ae.resize(firstGenerated);
