@@ -18,6 +18,7 @@
 #include "objmethod.h"
 #include "activate.h"
 #include "pickup.h"
+#include "pccharacter.h"
 #include "render.h"
 #include "so.h"
 #include "vecmat.h"
@@ -398,6 +399,44 @@ XF* PxfRewardPoint(LO* ppocket)
     return it == s_mpreward.end() ? nullptr : it->second.pxf;
 }
 
+// Carmelita's playable model lives in a kept world, not the current world's
+// update table. Draw a cosmetic coin at its original reward record without
+// reserving a real pickup, changing inventory, or running the guard pocket SM.
+static void CollectPcCarmPocketDraw(const SCENE& scene, std::vector<EXTRADRAW>& draws)
+{
+    const int idef = IdefPcCharPuppet();
+    if (!g_psw || idef < 0 || idef >= 3) return;
+    ALO* root = PaloPcPuppetRoot();
+    ALO* pocket = dynamic_cast<ALO*>(PloPcPuppetNear(12787));
+    if (!root || !pocket || pocket->Cid() != 0x63 ||
+        !FLoInParentChain(pocket, root) || NPcCharDrawOverride(pocket) != 1) return;
+    static const int oidOnly = std::getenv("SLY2_ONLYOID") ? std::atoi(std::getenv("SLY2_ONLYOID")) : -2;
+    if (oidOnly != -2 && pocket->oid != oidOnly) return;
+    const XF* point = nullptr;
+    for (const auto& xf : pocket->axf)
+        if (xf && xf->tag == 0x2B0 && xf->kind == 0xD) { point = xf.get(); break; }
+    if (!point) return;
+    // StepPuppet already updates the complete hierarchy after posing it.
+    // Prefer a real readied coin reward from the current world. The normal
+    // pickup model is also a valid source for the original extra-draw path.
+    auto tryCoin = [&](LO* lo) {
+        ALO* coin = dynamic_cast<ALO*>(lo);
+        if (!coin || coin->Cid() != 0x5B || !coin->pglobset) return false;
+        const size_t first = draws.size();
+        AppendAloExtraDraws(scene, coin, point->matWorld, 1.0f, draws);
+        return draws.size() != first;
+    };
+    for (const UPDENT& entry : g_psw->aupd)
+    {
+        const auto it = s_mpreward.find(entry.plo);
+        if (it != s_mpreward.end() && tryCoin(it->second.plo)) return;
+    }
+    for (LO* lo : g_psw->mpcidaplo[0x5B])
+        if (tryCoin(lo)) return;
+    // No loaded coin geometry in this scene: leave the pouch empty rather
+    // than spawn a pickup or change an original NPC's inventory.
+}
+
 // orig: 0x001C2D70: after the pocket's ordinary ALO draw, draw its readied
 // reward through 0x1A5EE8 at +0x150's world matrix, with both alphas 1.
 // The reward's pickup state 2 deliberately keeps it out of the ordinary draw pass.
@@ -427,6 +466,7 @@ void CollectPocketDraws(const SCENE& scene, std::vector<EXTRADRAW>& draws)
                         pocket->oid, model->oid, draws.size() - first, pos.x, pos.y, pos.z);
         }
     }
+    CollectPcCarmPocketDraw(scene, draws);
 }
 
 // orig: 0x001C2DC8 (the reward readied in the pocket object: a proxy's instance attached (1 when there is none) or the
