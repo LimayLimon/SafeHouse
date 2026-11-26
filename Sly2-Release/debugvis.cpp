@@ -1171,7 +1171,7 @@ void DrawDebugVis(SW* psw)
                 const float x=c.x-42,y=c.y;
                 g_hud.FillScreenRect(x-1,y-1,x+85,y+8,Col(0x111111),Z_PANEL);
                 if(frac>0) g_hud.FillScreenRect(x,y,x+84*frac,y+7,Col(frac>0.5f?0x53C77D:frac>0.25f?0xE4B94F:0xDA5B56),Z_LINE);
-                const std::string label="Slai  "+std::to_string(*hp)+" / "+std::to_string(c_nSlaiMaxHP)+" HP · "+SzModSlaiState(o)+" · $"+std::to_string(NModSlaiCoins(o))+"/5";
+                const std::string label="Slai  "+std::to_string(*hp)+" / "+std::to_string(c_nSlaiMaxHP)+" HP · "+SzModSlaiState(o)+" · $"+std::to_string(NModSlaiCoins(o))+"/"+std::to_string(c_nSlaiMaxCoins);
                 Text(label,c.x-DxText(label,11)*0.5f,y-15,11,0xFFFFFF);
             }
     }

@@ -30,6 +30,7 @@ const LO* PloModSlaiNamespace(const LO* plo);
 bool FModSlaiTargetable(const LO* plo);
 bool FModSlaiOrdinaryGuard(const LO* plo);
 inline constexpr int c_nSlaiMaxHP = 150;
+inline constexpr int c_nSlaiMaxCoins = 10;
 const char* SzModSlaiState(const LO* plo);
 int* PnModSlaiHealth(const LO* plo);
 int NModSlaiCoins(const LO* plo);
