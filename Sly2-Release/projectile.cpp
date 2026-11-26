@@ -631,6 +631,15 @@ void SetProjectileLauncher(ALO* palo, LO* plaunch)
     RecalcSwOxfFilterForObject(palo);
 }
 
+LO* PloProjectileLauncherActor(const LO* projectile)
+{
+    const auto it=MpProj().find(projectile);
+    if(it==MpProj().end())return nullptr;
+    for(LO* o=it->second.plaunch;o;o=o->paloParent)
+        if(o!=projectile&&o->fInWorld&&!o->fRemoved&&FCidDerivedFrom(o->Cid(),0x33))return o;
+    return nullptr;
+}
+
 glm::vec3 ProjectCnstr(const CNSTRS& c, const XF* pxfOwner, const glm::vec3& v);  // solve.cpp (0x1FA810)
 namespace
 {
