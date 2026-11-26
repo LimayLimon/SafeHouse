@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "worldglobals.h"
 #include "breakable.h"
+#include "modguests.h"
 #include "pickup.h"
 #include "xf.h"
 #include "worldaccess.h"
@@ -299,6 +300,7 @@ void RunHit(LO* plo)
 // orig: 0x001BAED8 (the hit by a, filter n: posted to the world's deferred calls (0x149AB8))
 void PostHit(LO* plo, LO* ploHit, int grf)
 {
+    if (PloModSlaiNamespace(ploHit)) return; // guest must not trigger scenery damage
     BRK& b = Brk(plo);
     b.ploHit = ploHit;
     b.grfHit = grf;
@@ -312,6 +314,7 @@ bool FAcceptBreakableContact(ALO* p, CTMSG* pctm)
     if (std::getenv("SLY2N_BRKDEBUG") && std::getenv("SLY2N_BRKDEBUG")[0] == '2')
         std::printf("breakable %d %p contact from %d: valid %d event %d bytes 0x%llX filter 0x%X\n", p->oid, static_cast<void*>(p),
                     pctm->ploSender ? pctm->ploSender->oid : -1, int(FValidEvent(b)), b.icur, (unsigned long long)pctm->grfAccepted, pctm->grfFilter);
+    if (PloModSlaiNamespace(pctm->ploSender)) return false;
     if (!FValidEvent(b)) return false;
     if (!pctm->grfAccepted) return false;
     if ((pctm->grfAccepted & 0xC) != 0x8) return true;
@@ -340,6 +343,7 @@ void UpdateBreakableContacts(ALO* p)
     {
         if (!pl->poxOther || !pl->poxOther->pxp) continue;
         ALO* pOther = pl->psoOther;
+        if (PloModSlaiNamespace(pOther)) continue; // leave physical collision intact
         for (const auto& [cid, fOn] : b.atrig)
         {
             if (!fOn || !pOther || !FIsLoDerivedFrom(pOther, static_cast<CID>(cid))) continue;

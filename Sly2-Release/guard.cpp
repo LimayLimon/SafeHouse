@@ -658,10 +658,14 @@ LO* PloGuardTarget(GUARD* pg)
     LO* native = pg->palo->pcls && pg->palo->pcls->PfnOrig(88) == 0x14B290 && !FGuardState(pg, 0x24) ? PloGuardTarget3F(pg) : PloGuardTargetBase(pg);
     if(!FModSlaiOrdinaryGuard(pg->palo)||!pg->pdet||pg->pdet->fNever||FGamePausedForAi())return native;
     if(pg->ploTarget&&pg->ploTarget->fInWorld&&!FModSlaiGuest(pg->ploTarget))return native; // authored target
-    if(native&&!FModSlaiGuest(native)&&FTargetClass(pg->acid3C4,native))return native;
+    bool hasSlai=false;
+    for(int i=0;i<CModGuestsLive();++i)if(FModSlaiTargetable(PloModGuestLive(i))){hasSlai=true;break;}
+    if(native&&FModSlaiGuest(native)&&!FModSlaiTargetable(native))native=nullptr;
+    if(!hasSlai)return native;
+    if(native&&!FModSlaiGuest(native)&&FTargetClass(pg->acid3C4,native)&&NDetectState(pg->pdet,native,0)==1)return native;
     const glm::vec3 pos=PosOf(pg->palo);
     float best= native ? glm::length(PosOf(native)-pos) : 2500.0f;
-    if(native&&!FModSlaiGuest(native)){auto* e=PdetentryFind(pg->pdet,native);if(!e||e->st!=1)best=2500.0f;}
+    if(native&&!FModSlaiGuest(native)){auto* e=PdetentryFind(pg->pdet,native);if(!e||e->st!=1||NDetectState(pg->pdet,native,0)!=1)best=2500.0f;}
     for(int i=0;i<CModGuestsLive();++i)
     {
         LO* slai=PloModGuestLive(i);if(!FModSlaiTargetable(slai))continue;

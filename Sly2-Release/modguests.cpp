@@ -55,7 +55,7 @@ struct LIVE
     int hp = c_nSlaiMaxHP;
     const char* state = "spawn";
     glm::vec3 blockedPos{0}, freeGoal{0};
-    float blockedUntil=0, freeUntil=0, nextLocal=0, nextPad=0;
+    float blockedUntil=0, freeUntil=0, nextLocal=0, nextPad=0, nextRecovery=0;
     LO* path = nullptr;
     ASEG* walk = nullptr;
     ASEG* idle = nullptr;
@@ -75,6 +75,11 @@ struct LIVE
     float hurtUntil = 0, respawnAt = 0, nextHit = 0;
     float attackUntil = 0, strikeAt = 0, nextAttack = 0;
     bool struck = false, fleeing = false;
+    // Social activity is separate from mood and never overrides danger.
+    LO* socialPlayer = nullptr;
+    bool following = false, followHolding = false, visiting = false;
+    float lastPlayerSeen = 0, holdUntil = 0, nextVisit = 0;
+    float visitDeadline = 0, visitEnd = 0, socialCooldown = 0;
     bool hasSpawn = false;
     glm::vec3 spawn{0.0f};
     float spawnS = 0, spawnHeading = 0;
@@ -112,8 +117,20 @@ constexpr float c_sSlaiRun = 700.0f;
 constexpr float c_sSlaiDetect = 2500.0f;
 constexpr float c_sSlaiObserve = 1400.0f;
 constexpr float c_sSlaiSafe = 3000.0f;
+constexpr float c_sSlaiFollowStop = 900.0f, c_sSlaiFollowResume = 1500.0f;
+// An unsolicited visit stops just outside Carmelita's existing discovery radius.
+constexpr float c_sSlaiVisitStop = 1500.0f, c_sSlaiVisitResume = 2100.0f;
+constexpr float c_sSlaiVisitRange = 6000.0f;
 constexpr float c_gSlaiVisual = 0.70710678f; // 90 degree horizontal FOV, character heading, not camera
 float RandomRange(float a, float b) { return std::uniform_real_distribution<float>(a,b)(s_rng); }
+void ResetSocial(LIVE& l,float now,bool pause)
+{
+    l.following=false;l.followHolding=false;l.visiting=false;
+    l.holdUntil=0;l.lastPlayerSeen=0;l.visitDeadline=0;l.visitEnd=0;
+    l.nextVisit=now+RandomRange(60,120);
+    l.socialCooldown=pause?now+RandomRange(10,20):0;
+    l.freeUntil=0;l.nextLocal=now;
+}
 float ClipTime(ASEG* a, float fallback) { return a && a->asegd.tMax > 0.05f ? std::clamp(a->asegd.tMax,0.1f,5.0f) : fallback; }
 
 std::string WorldNameOf(int iwrec)
@@ -312,6 +329,10 @@ bool GroundConnection(const glm::vec3& from,const glm::vec3& to)
         q.z=last.z;
         if(!FDropOnGround(&q,50,-70,false)||std::abs(q.z-last.z)>35) return false;
         if(!SlaiClearLine(last+glm::vec3(0,0,65),q+glm::vec3(0,0,65))) return false;
+        // A center ray alone can pass a corner even while the body gets caught.
+        const glm::vec2 travel(q-last); const float len=glm::length(travel);
+        if(len>1){const glm::vec2 side(-travel.y/len,travel.x/len);
+            for(float width:{-22.0f,22.0f}){const glm::vec3 offset(side*width,55);if(!SlaiClearLine(last+offset,q+offset))return false;}}
         last=q;
     }
     return std::abs(last.z-to.z)<65;
@@ -353,7 +374,7 @@ bool LocalGoal(LIVE& l,const glm::vec3& desired,bool flee,bool explore,glm::vec3
         const glm::vec2 v(forward.x*std::cos(angle)-forward.y*std::sin(angle),forward.x*std::sin(angle)+forward.y*std::cos(angle));
         glm::vec3 q=l.pos+glm::vec3(v*length,0);
         if(!FDropOnGround(&q,60,-80,false)||!GroundConnection(l.pos,q))continue;
-        if(g_clock.t<l.blockedUntil&&Distance(q,l.blockedPos)<170)continue;
+        if(g_clock.t<l.blockedUntil && Distance(q,l.blockedPos)<100 && Distance(q,l.blockedPos)<=Distance(l.pos,l.blockedPos)+20)continue;
         float score=glm::dot(v,forward)*length-std::abs(angle)*12;
         if(!explore)score+=(flee?1:-1)*(Distance(q,desired)-Distance(l.pos,desired));
         if(score>best){best=score;out=q;found=true;}
@@ -399,7 +420,7 @@ bool SwitchPath(SW* psw,LIVE& l,const glm::vec3* away,bool force)
         }
     }
     if(!best)return false;
-    RememberPath(l,l.path);l.path=best;l.s=bestS;l.dir=bestDir;l.routeSince=g_clock.t;l.lastProgress=g_clock.t;l.nextDirection=g_clock.t+1.5f;
+    RememberPath(l,l.path);l.path=best;l.s=bestS;l.dir=bestDir;l.routeSince=g_clock.t;l.nextDirection=g_clock.t+1.5f;
     if(FPrint())std::printf("Slai: switched to path %d at %.1f\n",best->oid,bestS);
     return true;
 }
@@ -412,11 +433,8 @@ struct SlaijumpPlan
     float s = 0, flight = 0;
     int dir = 1;
 };
-bool PlanSlaiJump(LIVE& l, LO* path, float s, int dir, SlaijumpPlan& out)
+bool PlanSlaiLanding(LIVE& l, const glm::vec3& q, LO* path, float s, int dir, SlaijumpPlan& out)
 {
-    const CRV* c=PcrvFromLo(path);
-    glm::vec3 q(0);
-    if(!SamplePath(c,s,q))return false;
     const glm::vec3 delta=q-l.pos;
     const float span=glm::length(glm::vec2(delta));
     if(span<65 || span>350 || delta.z>110 || delta.z<-550)return false;
@@ -427,14 +445,17 @@ bool PlanSlaiJump(LIVE& l, LO* path, float s, int dir, SlaijumpPlan& out)
         glm::vec3 test=q+glm::vec3(offset,0);
         if(!FDropOnGround(&test,35,-35,false)||std::abs(test.z-q.z)>25)return false;
     }
-    glm::vec3 ahead(0);
-    if(!SamplePath(c,s+dir*65,ahead)||glm::length(glm::vec2(ahead-q))<15||!GroundConnection(q,ahead))return false;
+    // Landing may be off-path, but must have an exit on verified ground.
+    glm::vec3 ahead(0); bool exit=false;
+    if(path) { const CRV* c=PcrvFromLo(path); exit=SamplePath(c,s+dir*65,ahead)&&glm::length(glm::vec2(ahead-q))>=15&&GroundConnection(q,ahead); }
+    else for(const glm::vec2 v:{glm::vec2(65,0),glm::vec2(-65,0),glm::vec2(0,65),glm::vec2(0,-65)}) { ahead=q+glm::vec3(v,0); if(FDropOnGround(&ahead,35,-35,false)&&GroundConnection(q,ahead)){exit=true;break;} }
+    if(!exit)return false;
     const SOST* st=Psost(static_cast<ALO*>(l.plo));
     if(!st||!std::isfinite(st->dvGravity.z)||st->dvGravity.z>=-1)return false;
     const float g=-st->dvGravity.z;
     // Choose a small arc for a step up or down. Apply only the initial velocity;
     // native STEP physics, gravity and collision response integrate the flight.
-    const float rise=std::max(0.0f,delta.z)+65.0f;
+    const float rise=std::max(0.0f,delta.z)+105.0f;
     const float vz=std::sqrt(2*g*rise);
     const float t=(vz+std::sqrt(std::max(0.0f,vz*vz-2*g*delta.z)))/g;
     if(!std::isfinite(t)||t<0.2f||t>1.7f||span/t>c_sSlaiRun)return false;
@@ -449,7 +470,11 @@ bool PlanSlaiJump(LIVE& l, LO* path, float s, int dir, SlaijumpPlan& out)
             if(!SlaiClearLine(last+glm::vec3(0,0,z),at+glm::vec3(0,0,z)))return false;
         last=at;
     }
-    out={path,q,vel,BoundS(c,s),t,dir};return true;
+    out={path,q,vel,path?BoundS(PcrvFromLo(path),s):0.0f,t,dir};return true;
+}
+bool PlanSlaiJump(LIVE& l, LO* path, float s, int dir, SlaijumpPlan& out)
+{
+    glm::vec3 q(0); return SamplePath(PcrvFromLo(path),s,q)&&PlanSlaiLanding(l,q,path,s,dir,out);
 }
 bool TrySlaiJump(SW* psw,LIVE& l,const glm::vec3* interest,bool away)
 {
@@ -479,7 +504,23 @@ bool TrySlaiJump(SW* psw,LIVE& l,const glm::vec3* interest,bool away)
             if(score>bestScore){best=plan;bestScore=score;}
         }
     }
-    if(!best.path)return false;
+    // Look for a safe landing beyond an obstacle even when no patrol curve exists there.
+    glm::vec2 forward(std::cos(l.heading),std::sin(l.heading));
+    if(interest){glm::vec2 v(*interest-l.pos);if(away)v=-v;if(glm::length(v)>1)forward=glm::normalize(v);}
+    for(float angle:{0.0f,0.40f,-0.40f,0.85f,-0.85f,1.57f,-1.57f})
+    for(float length:{150.0f,235.0f,320.0f})
+    {
+        glm::vec2 v(forward.x*std::cos(angle)-forward.y*std::sin(angle),forward.x*std::sin(angle)+forward.y*std::cos(angle));
+        glm::vec3 q=l.pos+glm::vec3(v*length,0);
+        if(!FDropOnGround(&q,110,-550,false))continue;
+        if(now<l.blockedUntil&&Distance(q,l.blockedPos)<100)continue;
+        if(interest&&away&&Distance(q,*interest)<Distance(l.pos,*interest)+20)continue;
+        SlaijumpPlan plan;if(!PlanSlaiLanding(l,q,nullptr,0,1,plan))continue;
+        float score=glm::dot(v,forward)*length*0.5f-std::abs(angle)*30-0.3f*length;
+        if(interest)score+=(away?1.0f:-1.0f)*(Distance(q,*interest)-Distance(l.pos,*interest));
+        if(score>bestScore){bestScore=score;best=plan;}
+    }
+    if(best.flight<=0)return false;
     l.jumping=true;l.jumpStarted=now;l.jumpDeadline=now+best.flight+0.8f;
     l.jumpPath=best.path;l.jumpGoal=best.target;l.jumpS=best.s;l.jumpDir=best.dir;
     l.heading=std::atan2(best.velocity.y,best.velocity.x);
@@ -487,7 +528,7 @@ bool TrySlaiJump(SW* psw,LIVE& l,const glm::vec3* interest,bool away)
     st->nMotion=-1;st->vecVel=glm::vec3(0);st->pxpFloor=nullptr;
     SetAloVelocityTo(st->palo,best.velocity);WakeAlo(st->palo);
     RestartClip(l,l.jumpClip);
-    std::printf("Slai: jump to path %d, height %.0f, flight %.2f\n",best.path->oid,best.target.z-l.pos.z,best.flight);
+    std::printf("Slai: jump to path %d, height %.0f, flight %.2f\n",best.path?best.path->oid:-1,best.target.z-l.pos.z,best.flight);
     return true;
 }
 // Use only discovered upward PAD bindings with a verified landing route. Do not fire mission scripts.
@@ -542,11 +583,11 @@ bool StepSlaiJump(SW* psw,LIVE& l,STEP* st,float now)
         return true; // do not reapply launch velocity, hold, or snap to path
     }
     l.jumping=false;st->nMotion=0;st->vecVel=glm::vec3(0);
-    l.lastProgress=now;l.nextProgressCheck=now+1;l.progressPos=l.pos;l.nextJump=now+3;
+    l.lastProgress=now;l.nextProgressCheck=now+0.5f;l.progressPos=l.pos;l.nextJump=now+3;
     if(landed)
     {
         const bool arrived=Distance(l.pos,l.jumpGoal)<110;
-        if(arrived){RememberPath(l,l.path);l.path=l.jumpPath;l.s=l.jumpS;l.dir=l.jumpDir;}
+        if(arrived&&l.jumpPath){RememberPath(l,l.path);l.path=l.jumpPath;l.s=l.jumpS;l.dir=l.jumpDir;}
         else {float s=0;LO* path=FindPatrol(psw,l.pos,s,nullptr,150);if(path){RememberPath(l,l.path);l.path=path;l.s=s;}else l.path=nullptr;}
         l.safePos=l.pos;l.hasSafePos=true;l.routeSince=now;
         std::printf("Slai: jump landed (%s)\n",arrived?"target":"other floor");
@@ -631,9 +672,10 @@ void StepSlai(SW* psw,LIVE& l)
         std::printf("Slai: respawn, HP 0 -> %d\n",c_nSlaiMaxHP);
         l.hp=c_nSlaiMaxHP;l.respawnAt=0;l.hurtUntil=0;l.nextHit=now+2;
         l.attackUntil=0;l.attackTarget=nullptr;l.fleeing=false;l.restUntil=0;
+        ResetSocial(l,now,false);l.socialPlayer=nullptr;
         l.jumping=false;l.jumpPath=nullptr;l.nextJump=now+3;
         l.path=l.spawnPath;l.s=l.spawnS;l.pos=l.spawn;l.heading=l.spawnHeading;
-        l.recentPaths.clear();l.blockedUntil=0;l.freeUntil=0;l.nextLocal=now;l.nextPad=now+3;l.routeSince=now;l.lastProgress=now;l.nextProgressCheck=now+1;l.progressPos=l.spawn;
+        l.recentPaths.clear();l.nextRecovery=0;l.blockedUntil=0;l.freeUntil=0;l.nextLocal=now;l.nextPad=now+3;l.routeSince=now;l.lastProgress=now;l.nextProgressCheck=now+0.5f;l.progressPos=l.spawn;
         l.nextRest=now+RandomRange(5,10);l.nextSearch=now;l.nextSwitch=now+3;
         PlaceAt(l.plo,l.spawn,l.heading);PlaySlai(l,false);hold();return;
     }
@@ -643,8 +685,9 @@ void StepSlai(SW* psw,LIVE& l)
         if(!StartSlaiPath(psw,l)){hold();PlaySlai(l,false);return;}
         glm::vec3 q(0);if(!SamplePath(PcrvFromLo(l.path),l.s,q)){l.path=nullptr;hold();return;}
         l.hasSpawn=true;l.spawn=q;l.spawnS=l.s;l.spawnPath=l.path;l.spawnHeading=l.heading;
-        l.pos=q;l.safePos=q;l.hasSafePos=true;l.progressPos=q;l.lastProgress=now;l.nextProgressCheck=now+1;
+        l.pos=q;l.safePos=q;l.hasSafePos=true;l.progressPos=q;l.lastProgress=now;l.nextProgressCheck=now+0.5f;
         l.routeSince=now;l.nextRest=now+RandomRange(5,10);l.nextSwitch=now+3;
+        ResetSocial(l,now,false);
         PlaceAt(l.plo,q,l.heading);hold();return;
     }
     if(StepSlaiJump(psw,l,step,now)){l.state="jump";return;}
@@ -656,27 +699,35 @@ void StepSlai(SW* psw,LIVE& l)
     }
     if(now<l.hurtUntil){l.state="hurt";hold();return;}
     ScanSlaiPads(psw,l);
-    if(!l.path && now>=l.nextSearch){l.nextSearch=now+0.5f;if(StartSlaiPath(psw,l)){l.routeSince=now;l.lastProgress=now;}}
+    if(!l.path && now>=l.nextSearch){l.nextSearch=now+0.5f;if(StartSlaiPath(psw,l)){l.routeSince=now;}}
     const CRV* c=PcrvFromLo(l.path);
     if(!c||c->as.size()<2){l.path=nullptr;c=nullptr;}
     // Resynchronize route progress to actual physical position, not an assumed kinematic distance.
     if(c){float nearS=l.s;glm::vec3 raw(0);NearestCrvAll(c,l.pos,&raw,nullptr,nullptr,&nearS);
     if(std::isfinite(nearS))l.s=BoundS(c,nearS);}
     LO* player=PloPoCurrent(psw);
-    const bool carm=player&&player!=l.plo&&FPcCarm(player)&&FCidDerivedFrom(player->Cid(),0x30);
-    glm::vec3 pp=carm?PosAloCenter(static_cast<ALO*>(player)):glm::vec3(0);
+    const bool validPlayer=player&&player!=l.plo&&player->fInWorld&&!player->fRemoved&&FCidDerivedFrom(player->Cid(),0x34);
+    if(l.socialPlayer!=(validPlayer?player:nullptr))
+    {
+        ResetSocial(l,now,false);l.socialPlayer=validPlayer?player:nullptr;
+    }
+    const bool carm=validPlayer&&FPcCarm(player);
+    glm::vec3 pp=validPlayer?PosAloCenter(static_cast<ALO*>(player)):glm::vec3(0);
     const glm::vec3 eye=l.pos+glm::vec3(0,0,65);
-    const float d=carm?Distance(pp,eye):1e10f;
-    const bool seen=carm&&d<=c_sSlaiDetect&&SlaiClearLine(eye,pp);
+    const float d=validPlayer?Distance(pp,eye):1e10f;
+    const bool seen=validPlayer&&d<=c_sSlaiDetect&&SlaiClearLine(eye,pp);
     bool discovered=false;
-    if(seen&&d<=c_sSlaiObserve)if(STEP* st=PstepFromLo(player))
+    if(carm&&seen&&d<=c_sSlaiObserve)if(STEP* st=PstepFromLo(player))
     {
         const float rad=RadStepHeading(st);const glm::vec2 f(std::cos(rad),std::sin(rad)),to(eye.x-pp.x,eye.y-pp.y);
         const float t2=glm::dot(to,to);discovered=t2<1||glm::dot(f,to)>=c_gSlaiVisual*std::sqrt(t2);
     }
     if(!carm||d>=c_sSlaiSafe)l.fleeing=false;
     else if(discovered&&!l.fleeing){l.fleeing=true;l.nextDirection=now;}
-    if(l.fleeing){l.attackUntil=0;l.attackTarget=nullptr;l.restUntil=0;}
+    if(l.fleeing){
+        if(l.following||l.visiting||l.followHolding)ResetSocial(l,now,true);
+        l.attackUntil=0;l.attackTarget=nullptr;l.restUntil=0;
+    }
     // Combat persists through attack cooldowns; only an actual approach can translate the actor.
     if(!l.fleeing)
     {
@@ -689,6 +740,7 @@ void StepSlai(SW* psw,LIVE& l)
             if(dist>950||now-l.lastGuardSeen>2){l.attackTarget=nullptr;l.attackUntil=0;}
             else
             {
+                if(l.visiting||l.following||l.followHolding)ResetSocial(l,now,true);
                 l.state="combat";l.restUntil=0;l.lastProgress=now;FaceSlai(l,target,dt);
                 if(now<l.attackUntil){if(!l.struck&&now>=l.strikeAt){l.struck=true;StrikeSlai(l);}hold();return;}
                 const glm::vec3 v=target-l.pos;const float angle=std::abs(std::remainder(std::atan2(v.y,v.x)-RadStepHeading(step),6.2831853f));
@@ -709,13 +761,65 @@ void StepSlai(SW* psw,LIVE& l)
             }
         }
     }
-    float speed=c_sSlaiWalk;bool move=true;
-    if(l.fleeing||seen)
+    // A visit is scheduled once, not rolled every frame. Travel and stay have distinct deadlines.
+    if(!l.fleeing&&validPlayer)
     {
-        l.restUntil=0;l.nextRest=now+RandomRange(5,10);
+        if(l.visiting&&((l.visitEnd>0&&now>=l.visitEnd)||
+            (l.visitEnd==0&&now>=l.visitDeadline)||d>c_sSlaiVisitRange))
+        {
+            ResetSocial(l,now,true);
+            l.nextRest=now+RandomRange(5,10);
+            std::printf("Slai: visit ended\n");
+        }
+        if(!l.visiting&&now>=l.nextVisit)
+        {
+            l.nextVisit=now+RandomRange(60,120);
+            if(d<=c_sSlaiVisitRange&&now>=l.socialCooldown&&RandomRange(0,1)<0.65f)
+            {
+                l.visiting=true;l.followHolding=false;l.holdUntil=0;
+                l.visitDeadline=now+30;l.visitEnd=0;l.freeUntil=0;l.nextLocal=now;
+                l.lastProgress=now;l.progressPos=l.pos;
+                std::printf("Slai: spontaneous visit started\n");
+            }
+        }
+        if(seen)l.lastPlayerSeen=now;
+        const bool tracking=seen||(l.following&&d<=c_sSlaiDetect&&now-l.lastPlayerSeen<=2.0f);
+        const bool wants=l.visiting||(carm&&tracking&&now>=l.socialCooldown);
+        if(wants&&!l.following)
+        {
+            l.following=true;l.followHolding=false;l.holdUntil=0;l.freeUntil=0;l.nextLocal=now;
+            l.lastProgress=now;l.progressPos=l.pos;
+        }
+        else if(!wants&&l.following)
+        {
+            l.following=false;l.followHolding=false;l.holdUntil=0;l.freeUntil=0;l.nextLocal=now;
+        }
+    }
+    const bool follow=validPlayer&&!l.fleeing&&l.following;
+    const bool interested=follow||l.fleeing;
+    float speed=c_sSlaiWalk;bool move=true;
+    if(interested)
+    {
+        if(l.restUntil>0){l.restUntil=0;l.nextRest=now+RandomRange(5,10);}
         if(l.fleeing)speed=l.run?c_sSlaiRun:c_sSlaiWalk;
-        else if(d<=c_sSlaiObserve){move=false;FaceSlai(l,pp,dt);}
-        else if(d<c_sSlaiObserve+150)speed=c_sSlaiWalk;
+        else
+        {
+            const float stop=l.visiting?c_sSlaiVisitStop:c_sSlaiFollowStop;
+            const float resume=l.visiting?c_sSlaiVisitResume:c_sSlaiFollowResume;
+            // For visits, require sight before declaring arrival; don't wait behind a wall.
+            if(!l.followHolding&&d<=stop&&(!l.visiting||seen))
+            {
+                l.followHolding=true;l.holdUntil=now+2;l.freeUntil=0;l.nextLocal=now;
+                if(l.visiting&&l.visitEnd==0)l.visitEnd=now+RandomRange(10,20);
+            }
+            if(l.followHolding&&now>=l.holdUntil&&d>=resume)
+            {
+                l.followHolding=false;l.freeUntil=0;l.nextLocal=now;
+                l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
+            }
+            if(l.followHolding){move=false;if(seen)FaceSlai(l,pp,dt);}
+            else speed=std::clamp((d-stop)*1.4f,90.0f,c_sSlaiWalk);
+        }
         glm::vec3 f(0),b(0);bool vf=SamplePath(c,l.s+180,f),vb=SamplePath(c,l.s-180,b);
         if(now>=l.nextDirection)
         {
@@ -733,34 +837,40 @@ void StepSlai(SW* psw,LIVE& l)
         if(now>=l.nextRest&&now>=l.restUntil){l.restUntil=now+RandomRange(5,12);l.nextRest=l.restUntil+RandomRange(5,10);l.restClip=l.idles.empty()?l.idle:l.idles[std::uniform_int_distribution<size_t>(0,l.idles.size()-1)(s_rng)];}
         if(now<l.restUntil){l.state="rest";hold();PlayClip(l,l.restClip);l.lastProgress=now;return;}
     }
-    if(!move){l.state="observe";hold();PlaySlai(l,false);l.lastProgress=now;return;}
+    if(!move){l.state=l.visiting?"visit-rest":"observe";hold();l.actualSpeed=0;PlaySlai(l,false);l.lastProgress=now;l.progressPos=l.pos;return;}
     if(now>=l.nextProgressCheck)
     {
-        if(glm::length(glm::vec2(l.pos-l.progressPos))>45)l.lastProgress=now;
-        l.progressPos=l.pos;l.nextProgressCheck=now+1;
+        if(glm::length(glm::vec2(l.pos-l.progressPos))>25)l.lastProgress=now;
+        l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
     }
-    const bool stuck=now-l.lastProgress>3.0f, old=now-l.routeSince>30.0f;
-    l.state=l.fleeing?"flee":seen?"follow":"explore";
-    if(stuck){l.blockedPos=l.pos;l.blockedUntil=now+18;l.freeUntil=0;l.nextLocal=0;}
+    const bool stuck=now-l.lastProgress>0.85f, old=now-l.routeSince>30.0f;
+    l.state=l.fleeing?"flee":l.visiting?"visit":follow?"follow":"explore";
+    if(stuck && now>=l.nextRecovery){
+        l.blockedPos=l.pos;l.blockedUntil=now+18;l.freeUntil=0;l.nextLocal=0;l.nextRecovery=now+1.0f;
+        if(TrySlaiPad(psw,l,interested?&pp:nullptr,l.fleeing,dt))return;
+        if(TrySlaiJump(psw,l,interested?&pp:nullptr,l.fleeing)){l.state="jump";return;}
+    }
     // Follow/flee in the world, not merely along a path. Keep waypoints long enough to make progress.
-    const bool freeMove=seen||l.fleeing||!c||stuck||now<l.freeUntil;
+    const bool freeMove=interested||!c||stuck||now<l.freeUntil;
     if(freeMove)
     {
-        if((seen||l.fleeing||!c||stuck)&&(now>=l.nextLocal||Distance(l.pos,l.freeGoal)<40||!GroundConnection(l.pos,l.freeGoal)))
+        if((interested||!c||stuck)&&(now>=l.nextLocal||Distance(l.pos,l.freeGoal)<40||!GroundConnection(l.pos,l.freeGoal)))
         {
             l.nextLocal=now+0.6f;
-            if(LocalGoal(l,pp,l.fleeing,!seen&&!l.fleeing,l.freeGoal))l.freeUntil=now+1.5f;
+            if(LocalGoal(l,pp,l.fleeing,!interested,l.freeGoal))l.freeUntil=now+1.5f;
             else l.freeUntil=0;
         }
         if(now<l.freeUntil&&GroundConnection(l.pos,l.freeGoal))
         {
-            if(stuck)l.lastProgress=now;
             SlaiDrive(l,l.freeGoal,speed,dt);
-            const bool run=l.fleeing&&l.run;PlayClip(l,run?l.run:l.walk,true);
+            const bool run=l.fleeing&&l.run;
+            const float actual=glm::length(glm::vec2(VelAloPos(a)));
+            l.actualSpeed=glm::mix(l.actualSpeed,actual,std::min(dt*8,1.0f));
+            PlayClip(l,run?l.run:l.walk,true,std::clamp(l.actualSpeed/(run?c_sSlaiRun:c_sSlaiWalk),0.25f,1.15f));
             return;
         }
-        if(TrySlaiPad(psw,l,seen||l.fleeing?&pp:nullptr,l.fleeing,dt))return;
-        if(TrySlaiJump(psw,l,seen||l.fleeing?&pp:nullptr,l.fleeing))return;
+        if(TrySlaiPad(psw,l,interested?&pp:nullptr,l.fleeing,dt))return;
+        if(TrySlaiJump(psw,l,interested?&pp:nullptr,l.fleeing))return;
     }
     if((old||!c)&&TrySlaiPad(psw,l,nullptr,false,dt))return;
     if(now>=l.nextSwitch)
@@ -783,10 +893,10 @@ void StepSlai(SW* psw,LIVE& l)
         if(now>=l.nextSwitch || stuck)
         {
             if(SwitchPath(psw,l,l.fleeing?&pp:nullptr,true)){c=PcrvFromLo(l.path);ok=findGoal();}
-            else {if(TrySlaiJump(psw,l,seen||l.fleeing?&pp:nullptr,l.fleeing))return;l.dir=-l.dir;l.nextDirection=now+2.0f;ok=findGoal();}
-            l.lastProgress=now;l.nextSwitch=now+0.5f;
+            else {if(TrySlaiJump(psw,l,interested?&pp:nullptr,l.fleeing))return;l.dir=-l.dir;l.nextDirection=now+2.0f;ok=findGoal();}
+            l.nextSwitch=now+0.5f;
         }
-        else if(!ok){if(TrySlaiJump(psw,l,seen||l.fleeing?&pp:nullptr,l.fleeing))return;l.dir=-l.dir;l.nextDirection=now+2.0f;ok=findGoal();}
+        else if(!ok){if(TrySlaiJump(psw,l,interested?&pp:nullptr,l.fleeing))return;l.dir=-l.dir;l.nextDirection=now+2.0f;ok=findGoal();}
     }
     if(!ok){hold();PlaySlai(l,false);return;}
     SlaiDrive(l,goal,speed,dt);
@@ -1134,12 +1244,20 @@ const LO* PloModSlaiNamespace(const LO* plo)
 bool FModSlaiOrdinaryGuard(const LO* plo)
 {
     if (!plo || !FCidDerivedFrom(plo->Cid(),0x38)) return false;
+    // pcguard.cpp lists root 11539 as the ordinary flashlight guard across episodes.
+    const CID cid=plo->Cid();
+    if(cid==0x3B||cid==0x3C||cid==0x3F||cid==0x40||FCidDerivedFrom(cid,0x3B))return false;
+    if(plo->oid==11539 || (plo->ploCloneOf && plo->ploCloneOf->oid==11539))return true;
     // Exclude named boss/special/script actors. The editor identifies ordinary guards
     // and swarmers by the authored shared-group name, not only by the base CID.
     if (g_psw && plo->igrp>=0 && size_t(plo->igrp)<g_psw->awe.size())
     {
-        std::string name=g_psw->awe[size_t(plo->igrp)].StrName();
+        const WE& group=g_psw->awe[size_t(plo->igrp)];
+        // Proxies can have their own instance OID; use the shared group's loaded root too.
+        for(int i=0;i<group.cloLoaded && size_t(i)<group.aplo.size();++i){const LO* root=group.aplo[size_t(i)];if(root&&root->oid==11539&&root->Cid()==cid)return true;}
+        std::string name=group.StrName();
         for(char& ch:name) ch=char(std::tolower(static_cast<unsigned char>(ch)));
+        if(name.find("flashlight")!=std::string::npos || name.find("searchlight")!=std::string::npos)return true;
         if(name.find("boss")!=std::string::npos || name.find("carmelita")!=std::string::npos ||
            name.find("neyla")!=std::string::npos || name.find("dimitri")!=std::string::npos ||
            name.find("rajan")!=std::string::npos || name.find("contessa")!=std::string::npos) return false;
@@ -1192,6 +1310,7 @@ bool FModSlaiAcceptDamage(LO* plo, const CTMSG* hit)
         l.hp -= int(std::min<int64_t>(l.hp,damage));
         std::printf("Slai: hit from %d, %s, damage %d, HP %d -> %d / %d\n",hit->ploSender->oid,electric?"electric":"normal",before-l.hp,before,l.hp,c_nSlaiMaxHP);
         l.nextHit=g_clock.t+1.0f; l.attackUntil=0; l.restUntil=0;
+        if(l.visiting||l.following||l.followHolding)ResetSocial(l,g_clock.t,true);
         if(STEP* step=PstepFromLo(l.plo)) step->vecVel=glm::vec3(0);
         if (LiveGuard(hit->ploSender)) { l.attackTarget=hit->ploSender; l.lastGuardSeen=g_clock.t; }
         if (l.hp <= 0) { l.respawnAt=g_clock.t+6.0f; RestartClip(l,l.defeat); }
