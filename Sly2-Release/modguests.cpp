@@ -758,18 +758,20 @@ bool PlanSlaiVertical(LIVE& l,const glm::vec3& from,const glm::vec3& to,SlaiVert
     const SOST* physics=Psost(static_cast<ALO*>(l.plo));
     if(!physics||!std::isfinite(physics->dvGravity.z)||physics->dvGravity.z>=-1)return false;
     const float g=-physics->dvGravity.z;
-    if(d.z<=145){
-        // Lower arc when descending; try extra clearance if the lip blocks it.
-        for(float margin:{65.f,105.f,145.f}){
+    if(d.z<=280){
+        // Car/ledge-sized surfaces: a forward single leap first, with room to clear the lip.
+        for(float margin:{105.f,165.f,230.f,300.f}){
+            if(std::max(0.f,d.z)+margin>480.f)continue;
             const float vz=std::sqrt(2*g*(std::max(0.f,d.z)+margin));
             const float t=(vz+std::sqrt(std::max(0.f,vz*vz-2*g*d.z)))/g;
             if(!std::isfinite(t)||t<0.2f||t>2.f||span/t>c_sSlaiRun)continue;
             const glm::vec3 v(d.x/t,d.y/t,vz);
             if(SlaiRoofArc(from,v,g,t,true)){plan={v,{},t,0};return true;}
         }
-        return false;
+        if(d.z<=145.f)return false;
     }
-    if(!l.doubleJumpClip)return false;
+    // During escape, do not stop for a vertical roof-climbing manoeuvre.
+    if(l.fleeing||!l.doubleJumpClip)return false;
     // Ascend beside the wall; the second impulse is aimed at the same landing.
     const float rise=340.f,vz=std::sqrt(2*g*rise),t=vz/g;
     const glm::vec3 v(0,0,vz), apex=from+glm::vec3(0,0,rise);
@@ -781,7 +783,7 @@ bool StepSlaiVertical(LIVE& l,const glm::vec3& intent,bool away,float now,float 
 {
     STEP* st=PstepFromLo(l.plo);
     if(!st||!st->pxpFloor||!l.jumpClip||SlaiWetPoint(l.pos)) {l.verticalApproach=false;return false;}
-    if(l.verticalApproach&&(now>=l.verticalUntil||away!=l.verticalAway||Distance(intent,l.verticalIntent)>450)){
+    if(l.verticalApproach&&(now>=l.verticalUntil||away!=l.verticalAway||(!away&&Distance(intent,l.verticalIntent)>450))){
         if(now>=l.verticalUntil)RememberSlaiFailure(l,l.verticalTo,true,now);
         l.verticalApproach=false;
     }
@@ -789,40 +791,46 @@ bool StepSlaiVertical(LIVE& l,const glm::vec3& intent,bool away,float now,float 
         glm::vec3 ground=l.pos;
         if(!FDropOnGround(&ground,30,-35,false)||std::abs(ground.z-l.pos.z)>30)return false;
         if(now<l.nextVertical||now<l.nextJump)return false;
-        l.nextVertical=now+1.5f;
+        l.nextVertical=now+(away?4.f:2.f);
         glm::vec2 f(intent-l.pos);if(away)f=-f;
         if(glm::length(f)<1)f=glm::vec2(std::cos(l.heading),std::sin(l.heading));else f=glm::normalize(f);
         const glm::vec2 side(-f.y,f.x);
         std::vector<glm::vec3> starts{l.pos};
-        for(glm::vec2 off:{f*90.f,-f*90.f,side*90.f,-side*90.f}){
+        for(glm::vec2 off:{-f*90.f,side*90.f,-side*90.f}){
+            if(away)break; // escape never walks to a distant takeoff point
             glm::vec3 q=l.pos+glm::vec3(off,0);
             if(FDropOnGround(&q,40,-50,false)&&std::abs(q.z-l.pos.z)<35&&SlaiVerticalFloor(q)&&GroundConnection(l.pos,q))starts.push_back(q);
         }
         struct Candidate {glm::vec3 from,to;float score;};
         std::vector<Candidate> candidates;
         // Sample actual collision floors in distinct height bands, including downward.
-        for(const auto& from:starts)for(float angle:{0.f,.55f,-.55f,1.1f,-1.1f,1.7f,-1.7f})
-        for(float r:{125.f,240.f,365.f,460.f}){
+        for(const auto& from:starts)for(float angle:{0.f,.55f,-.55f,1.1f,-1.1f})
+        for(float r:{80.f,125.f,190.f,280.f,365.f,460.f}){
+            if(away&&(std::abs(angle)>1.1f||r==190.f||r==365.f))continue;
             const glm::vec2 dir=f*std::cos(angle)+side*std::sin(angle);
-            for(glm::vec2 band:{glm::vec2(145,-55),glm::vec2(600,145),glm::vec2(-55,-550)}){
+            for(glm::vec2 band:{glm::vec2(280,-55),glm::vec2(600,280),glm::vec2(-55,-550)}){
+                if(away&&band.x==600.f)continue;
                 glm::vec3 q=from+glm::vec3(dir*r,0);
                 if(!FDropOnGround(&q,band.x,band.y,false)||SlaiWetPoint(q)||
                     (now<l.blockedUntil&&Distance(q,l.blockedPos)<90)||SlaiFailedGoalNear(l,q,true,now))continue;
                 if(r>400.f&&!SlaiWaterBetween(from,q))continue;
+                if(away&&(q.z-from.z>220.f||q.z-from.z<-150.f))continue;
                 const float gain=(away?-1.f:1.f)*(Distance(l.pos,intent)-Distance(q,intent));
                 if(gain<45)continue; // Every jump must make progress towards its current purpose.
-                const float score=gain-0.22f*Distance(l.pos,from)-0.12f*r-0.10f*std::abs(q.z-from.z);
+                // Do not fill the limited arc-test budget with ordinary walkable endpoints.
+                if(std::abs(q.z-from.z)<=65.f&&GroundConnection(from,q))continue;
+                const float score=gain-0.22f*Distance(l.pos,from)-0.12f*r-(away?0.65f:0.18f)*std::abs(q.z-from.z);
                 candidates.push_back({from,q,score});
             }
         }
         std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b){return a.score>b.score;});
         int checked=0;
         for(const auto& c:candidates){
-            if(++checked>24)break;
+            if(++checked>(away?5:12))break;
             SlaiVerticalPlan test;
             if(!PlanSlaiVertical(l,c.from,c.to,test))continue;
             l.verticalFrom=c.from;l.verticalTo=c.to;l.verticalIntent=intent;l.verticalAway=away;
-            l.verticalApproach=true;l.verticalUntil=now+2.5f;
+            l.verticalApproach=true;l.verticalUntil=now+1.5f;
             std::printf("Slai: vertical plan from %.0f %.0f %.0f to %.0f %.0f %.0f\n",c.from.x,c.from.y,c.from.z,c.to.x,c.to.y,c.to.z);
             break;
         }
@@ -850,6 +858,50 @@ bool StepSlaiVertical(LIVE& l,const glm::vec3& intent,bool away,float now,float 
     std::printf("Slai: %s toward %.0f %.0f %.0f\n",l.state,l.jumpGoal.x,l.jumpGoal.y,l.jumpGoal.z);
     return true;
 }
+// Correct horizontal drift toward a committed landing, preserving native vertical physics.
+// Do not steer the intentional first vertical phase of a roof double jump.
+void SteerSlaiAir(LIVE& l,STEP* st,float now)
+{
+    if(!l.verticalFlight||l.roofSecondPending||st->pxpFloor||now<l.hurtUntil||now>=l.jumpDeadline)return;
+    const SOST* physics=Psost(st->palo);
+    if(!physics||!std::isfinite(physics->dvGravity.z)||physics->dvGravity.z>=-1.f)return;
+    const float g=-physics->dvGravity.z;
+    const glm::vec3 current=VelAloPos(st->palo), delta=l.jumpGoal-l.pos;
+    if(!std::isfinite(current.x)||!std::isfinite(current.y)||!std::isfinite(current.z))return;
+    const float disc=current.z*current.z-2.f*g*delta.z;
+    if(disc<0.f||!std::isfinite(disc))return; // target is above the remaining apex
+    const float remain=(current.z+std::sqrt(disc))/g;
+    if(remain<=0.035f)return;
+    const float dt=std::clamp(g_clock.dt,0.f,0.05f);
+    if(dt<=0.f)return;
+    const glm::vec2 to(delta), old(current);
+    glm::vec2 want=to/std::max(remain,0.12f);
+    const float speed=glm::length(want);
+    if(speed>c_sSlaiRun)want*=c_sSlaiRun/speed;
+    glm::vec2 adjust=want-old;
+    const float change=glm::length(adjust), maxChange=2200.f*dt;
+    if(change<6.f)return;
+    if(change>maxChange)adjust*=maxChange/change;
+    const glm::vec2 next=old+adjust;
+    const glm::vec3 velocity(next,current.z);
+    // Check the short correction before applying it; do not inject movement through a wall.
+    // The same body-width/height rays as the launch planner are used here.
+    const float horizon=std::min(remain,0.12f);
+    const glm::vec3 predicted=l.pos+velocity*horizon-glm::vec3(0,0,0.5f*g*horizon*horizon);
+    const float nextSpeed=glm::length(next);
+    const glm::vec2 side=nextSpeed>1.f?glm::vec2(-next.y,next.x)/nextSpeed:glm::vec2(1,0);
+    // Short swept probes rather than re-running an entire ballistic planner every frame.
+    for(float w:{0.f,-24.f,24.f}){
+        const glm::vec3 off(side*w,0);
+        if(SlaiWetPoint(predicted+off))return;
+        for(float height:{18.f,75.f,145.f}){
+            const glm::vec3 ray=off+glm::vec3(0,0,height);
+            if(!SlaiClearLine(l.pos+ray,predicted+ray))return;
+        }
+    }
+    SetAloVelocityTo(st->palo,velocity);WakeAlo(st->palo);
+    if(glm::length(to)>15.f){FaceSlai(l,l.jumpGoal,dt);SetStepPhysHeading(st->palo,l.heading);}
+}
 bool StepSlaiJump(SW* psw,LIVE& l,STEP* st,float now)
 {
     if(!l.jumping)return false;
@@ -868,6 +920,7 @@ bool StepSlaiJump(SW* psw,LIVE& l,STEP* st,float now)
             std::printf("Slai: roof second jump\n");return true;
         }
         l.jumpDeadline=now+1.5f;
+        RememberSlaiFailure(l,l.jumpGoal,true,now);
         std::printf("Slai: roof second jump cancelled\n");
     }
     glm::vec3 q=l.pos;
@@ -875,19 +928,20 @@ bool StepSlaiJump(SW* psw,LIVE& l,STEP* st,float now)
     if(!landed&&(now<l.jumpDeadline||(l.verticalFlight&&now<l.jumpDeadline+1.5f&&!st->pxpFloor&&l.pos.z>l.jumpGoal.z-150.f)))
     {
         st->nMotion=-1;st->vecVel=glm::vec3(0);
-        return true; // do not reapply launch velocity, hold, or snap to path
+        SteerSlaiAir(l,st,now);
+        return true; // horizontal guidance only; never repeat the upward impulse
     }
     const bool vertical=l.verticalFlight, crossing=l.waterCrossFlight;
     l.jumpRecoveryAirborne=!landed&&!st->pxpFloor;
     l.waterCrossFlight=false;
     l.verticalFlight=false;l.jumping=false;l.roofSecondPending=false;l.roofFlight=false;st->nMotion=0;st->vecVel=glm::vec3(0);
-    l.lastProgress=now;l.nextProgressCheck=now+0.5f;l.progressPos=l.pos;l.nextJump=now+(vertical?0.65f:3.f);
+    l.lastProgress=now;l.nextProgressCheck=now+0.5f;l.progressPos=l.pos;l.nextJump=now+(vertical?1.5f:3.f);
     if(landed)
     {
         const bool arrived=crossing
             ? glm::length(glm::vec2(q-l.jumpGoal))<=75.f && std::abs(q.z-l.jumpGoal.z)<=35.f
               && SlaiVerticalFloor(q) && GroundConnection(q,l.jumpGoal)
-            : Distance(l.pos,l.jumpGoal)<110;
+            : glm::length(glm::vec2(q-l.jumpGoal))<=85.f && std::abs(q.z-l.jumpGoal.z)<=35.f;
         if(!arrived&&!l.waterJump)RememberSlaiFailure(l,l.jumpGoal,true,now);
         if(arrived&&l.jumpPath){RememberPath(l,l.path);l.path=l.jumpPath;l.s=l.jumpS;l.dir=l.jumpDir;}
         else {float s=0;LO* path=FindPatrol(psw,l.pos,s,nullptr,150);glm::vec3 entry(0);
@@ -896,15 +950,15 @@ bool StepSlaiJump(SW* psw,LIVE& l,STEP* st,float now)
             }else {l.path=nullptr;l.nextSearch=now;}}
         l.routeSince=now; // last dry point is updated only by the stable-floor sampler
         if(vertical){
-            l.freeUntil=0;l.nextLocal=now;l.nextVertical=now+0.65f;
-            if(!arrived){l.blockedPos=l.jumpGoal;l.blockedUntil=now+8;}
+            l.freeUntil=0;l.nextLocal=now;l.nextVertical=now+(arrived?1.5f:5.f);
+            if(!arrived){l.nextJump=now+5.f;l.blockedPos=l.jumpGoal;l.blockedUntil=now+8;}
             l.state="landing";
         }
         std::printf("Slai: %s landed (%s)\n",crossing?"water crossing":"jump",arrived?"target":"other floor");
     }
-    else {if(!l.waterJump)RememberSlaiFailure(l,l.jumpGoal,true,now);l.path=nullptr;l.nextSearch=now;if(vertical){l.blockedPos=l.jumpGoal;l.blockedUntil=now+8;l.nextVertical=now+1.5f;}std::printf("Slai: jump timeout\n");}
+    else {if(!l.waterJump)RememberSlaiFailure(l,l.jumpGoal,true,now);l.path=nullptr;l.nextSearch=now;if(vertical){l.blockedPos=l.jumpGoal;l.blockedUntil=now+8;l.nextVertical=now+5.f;l.nextJump=now+5.f;}std::printf("Slai: jump timeout\n");}
     l.jumpPath=nullptr;
-    if(vertical&&landed){SlaiDrive(l,l.pos,0,0.016f);PlaySlai(l,false);return true;}
+    if(vertical&&landed){l.hasCommandedGoal=false;} // resume ground decisions immediately
     return false;
 }
 // Water is not a grounded route. First attempt a native ballistic escape toward a dry ledge.
@@ -979,14 +1033,14 @@ bool StepSlaiDetour(LIVE& l,const glm::vec3& threat,bool stuck,float now,float d
                 const float angle=i*0.78539816f;glm::vec3 q=from+glm::vec3(140*std::cos(angle),140*std::sin(angle),0);
                 if(Distance(q,l.navNodes[0].pos)>800||!FDropOnGround(&q,50,-65,false)||SlaiWetPoint(q))continue;
                 bool duplicate=false;for(const auto& n:l.navNodes)if(Distance(n.pos,q)<80){duplicate=true;break;}
-                if(duplicate||!GroundConnection(from,q))continue;
+                if(duplicate||SlaiFailedGoalNear(l,q,false,now)||!GroundConnection(from,q))continue;
                 l.navNodes.push_back({q,idx});
             }
         }
         int best=-1;float value=0;const float base=Distance(l.navNodes[0].pos,threat);
         for(size_t i=1;i<l.navNodes.size();++i){const auto& q=l.navNodes[i].pos;const float gain=Distance(q,threat)-base;const float score=gain+0.12f*Distance(q,l.navNodes[0].pos);if(score>value){best=int(i);value=score;}}
-        if((best>0&&value>300)||l.navCursor>=l.navNodes.size()||l.navNodes.size()>=56||now-l.navStarted>1.5f){
-            if(best<0||value<55){ResetSlaiNav(l);l.navCooldown=now+2;return false;}
+        if((best>0&&value>90)||l.navCursor>=l.navNodes.size()||l.navNodes.size()>=56||now-l.navStarted>=0.35f){
+            if(best<0||value<55){ResetSlaiNav(l);l.navCooldown=now+4;return false;}
             for(int i=best;i>0;i=l.navNodes[i].parent)l.navRoute.push_front(l.navNodes[i].pos);
             l.navNodes.clear();l.navStarted=now;l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
             return StepSlaiDetour(l,threat,false,now,dt);
@@ -1128,7 +1182,7 @@ bool TrySlaiPatrolWater(LIVE& l,const CRV* c,float now)
 }
 bool StepSlaiPatrolPlan(SW* psw,LIVE& l,bool request,bool stuck,float now,float dt)
 {
-    auto fail=[&](float delay){ResetSlaiPatrolPlan(l);l.patrolRetry=now+delay;return false;};
+    auto fail=[&](float delay){ResetSlaiPatrolPlan(l);l.patrolRetry=now+std::max(delay,8.0f);return false;};
     if(l.patrolTarget){
         if(stuck&&now-l.patrolStarted>1.3f){
             if(!l.patrolRoute.empty())RememberSlaiFailure(l,l.patrolRoute.front(),false,now);
@@ -1190,7 +1244,7 @@ bool StepSlaiPatrolPlan(SW* psw,LIVE& l,bool request,bool stuck,float now,float 
         if(l.patrolEntries.empty())return fail(4.f);
         l.patrolNodes.push_back({l.pos,-1});l.patrolCursor=0;l.patrolStarted=now;l.patrolNext=now;
     }
-    if(now-l.patrolStarted>2.5f||Distance(l.pos,l.patrolNodes.front().pos)>85.f)return fail(3.f);
+    if(now-l.patrolStarted>=0.9f||Distance(l.pos,l.patrolNodes.front().pos)>85.f)return fail(3.f);
     if(now>=l.patrolNext){
         l.patrolNext=now+0.08f;
         // Test one node per slice, using short links and a fixed maximum graph size.
@@ -1306,7 +1360,10 @@ void StepSlai(SW* psw,LIVE& l)
         const float t2=glm::dot(to,to);discovered=t2<1||glm::dot(f,to)>=c_gSlaiVisual*std::sqrt(t2);
     }
     if(!carm||d>=c_sSlaiSafe){l.fleeing=false;ResetSlaiNav(l);}
-    else if(discovered&&!l.fleeing){l.fleeing=true;l.nextDirection=now;}
+    else if(discovered&&!l.fleeing){
+        l.fleeing=true;l.nextDirection=now;l.freeUntil=0;l.nextLocal=now;l.verticalApproach=false;
+        l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
+    }
     if(l.fleeing){
         if(l.following||l.visiting||l.followHolding)ResetSocial(l,now,true);
         l.attackUntil=0;l.attackTarget=nullptr;l.restUntil=0;
@@ -1446,23 +1503,52 @@ void StepSlai(SW* psw,LIVE& l)
             if(nearby&&SamplePath(PcrvFromLo(nearby),ns,routeGoal))verticalGoal=routeGoal;}
     }
     if(l.verticalApproach&&!interested&&!l.verticalAway)verticalGoal=l.verticalIntent;
-    glm::vec3 onPath(0);
-    const bool offPatrol=!c||!SlaiPatrolSample(c,l.s,onPath)||Distance(l.pos,onPath)>125.f;
+    // Keep moving on valid patrol/local routes; use the graph only after real lack of progress.
     if(!interested&&!l.verticalApproach&&l.patrolNodes.empty()&&!l.patrolTarget&&TrySlaiPatrolWater(l,c,now))return;
-    if(!interested&&!l.verticalApproach&&StepSlaiPatrolPlan(psw,l,stuck||offPatrol||old,stuck,now,dt))return;
+    if(!interested&&!l.verticalApproach&&StepSlaiPatrolPlan(psw,l,stuck,stuck,now,dt))return;
     const bool recover=stuck&&now>=l.nextRecovery&&l.navNodes.empty()&&l.navRoute.empty()&&!l.verticalApproach;
     if(recover){
         if(l.hasCommandedGoal)RememberSlaiFailure(l,l.commandedGoal,false,now);
         l.hasCommandedGoal=false;
         l.blockedPos=l.pos;l.blockedUntil=now+18;l.freeUntil=0;l.nextLocal=0;l.nextRecovery=now+1.0f;
     }
-    if(l.verticalApproach||((stuck||!c||(follow&&std::abs(pp.z-l.pos.z-65.f)>125.f))&&l.navNodes.empty()&&l.navRoute.empty()))
+    if(l.fleeing){
+        // Escape is a reactive ground-first task, not an exploration/roof search.
+        const bool validFree=now<l.freeUntil&&Distance(l.pos,l.freeGoal)>35.f&&
+            GroundConnection(l.pos,l.freeGoal)&&!SlaiFailedGoalNear(l,l.freeGoal,false,now);
+        auto runTo=[&](const glm::vec3& q){
+            l.verticalApproach=false;SlaiDrive(l,q,speed,dt);
+            PlayClip(l,l.run?l.run:l.walk);l.state="flee-ground";
+        };
+        if(!l.navRoute.empty()&&StepSlaiDetour(l,pp,stuck,now,dt))return;
+        if(validFree&&!stuck){ResetSlaiNav(l);runTo(l.freeGoal);return;}
+        glm::vec3 candidate(0);
+        const bool canProbe=now>=l.nextLocal||(!validFree&&l.freeUntil>0.f);
+        bool found=false;
+        if(canProbe){
+            l.nextLocal=now+0.18f;l.freeUntil=0;
+            found=LocalGoal(l,pp,true,false,candidate);
+            if(found&&Distance(candidate,pp)>Distance(l.pos,pp)+25.f){
+                ResetSlaiNav(l);l.freeGoal=candidate;l.freeUntil=now+0.8f;
+                if(stuck){l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;}
+                runTo(candidate);return;
+            }
+        }
+        if(StepSlaiDetour(l,pp,stuck,now,dt))return;
+        // A lateral or backwards ground move is preferable to a speculative roof jump.
+        if(found){l.freeGoal=candidate;l.freeUntil=now+0.6f;
+            if(stuck){l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;}
+            runTo(candidate);return;}
+        if(validFree){runTo(l.freeGoal);return;}
+        if((stuck||l.verticalApproach)&&StepSlaiVertical(l,pp,true,now,dt))return;
+        hold();PlaySlai(l,false);l.state="flee-blocked";return;
+    }
+    if(l.verticalApproach||((stuck||(follow&&std::abs(pp.z-l.pos.z-65.f)>125.f))&&l.navNodes.empty()&&l.navRoute.empty()))
         if(StepSlaiVertical(l,verticalGoal,l.fleeing,now,dt))return;
     if(recover){
         if(TrySlaiPad(psw,l,interested?&pp:nullptr,l.fleeing,dt))return;
         if(StepSlaiVertical(l,verticalGoal,l.fleeing,now,dt))return;
     }
-    if(l.fleeing&&StepSlaiDetour(l,pp,stuck,now,dt))return;
     // Follow/flee in the world, not merely along a path. Keep waypoints long enough to make progress.
     const bool freeMove=interested||!c||stuck||now<l.freeUntil;
     if(freeMove)
