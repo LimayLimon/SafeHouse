@@ -6,6 +6,7 @@
 // out), 6 held. Only the pickups this module launched run natively; the others keep the ALO's defaults.
 // pickup.cpp (the actors code).
 #include <glm/glm.hpp>
+#include <vector>
 
 struct LO;
 
@@ -17,6 +18,9 @@ void SetPickupLootKind(LO* plo, int id);          // orig 0x001C7A58 (loot varia
 // the time until it is collected by itself +0x1CC (FLT_MAX: never))
 void LaunchPickup(LO* plo, const glm::vec3& pos, const glm::vec3& vel, float dtSm, float dtCollect, LO* pproxy);
 void ResetPickups();
+// Free, ordinary dropped coins/charms; never scripted/auto-credit pickups.
+struct SlaiPickupTarget { glm::vec3 pos; bool heal; };
+std::vector<SlaiPickupTarget> ASlaiPickupTargets(const glm::vec3& pos, float radius);
 // orig: 0x00154E10 (a breakable's item 10: the drops at pos, n coins (-1: drawn), the charm counter's step dn)
 void DropPickups(const glm::vec3& pos, int n, int dn, LO* psrc);
 void PostLoadPickup(LO* plo);

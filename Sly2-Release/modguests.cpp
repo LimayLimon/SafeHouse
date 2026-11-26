@@ -20,6 +20,7 @@
 #include "bsp.h"
 #include "pccharacter.h"
 #include "projectile.h"
+#include "pickup.h"
 #include <random>
 #include <deque>
 #include <unordered_map>
@@ -55,6 +56,10 @@ struct LIVE
     bool fHold = false;   // (a player class: kept at its place)
     bool fSlai = false;  // opt-in: independent Sly guest, never the player
     int hp = c_nSlaiMaxHP;
+    int coins = 0;
+    glm::vec3 pickupGoal{0};
+    float nextPickupSearch=0, pickupUntil=0, pickupStarted=0, pickupSkipUntil=0;
+    glm::vec3 pickupSkipPos{0};
     const char* state = "spawn";
     glm::vec3 blockedPos{0}, freeGoal{0};
     float blockedUntil=0, freeUntil=0, nextLocal=0, nextPad=0, nextRecovery=0;
@@ -879,6 +884,41 @@ bool StartSlaiPath(SW* psw, LIVE& l)
     return true;
 }
 
+// Optional nearby pickup activity. Does not interfere with combat, escape,
+// airborne recovery, or visits; no need to leave/rejoin a path forcibly.
+bool StepSlaiPickup(LIVE& l,float now,float dt)
+{
+    if(l.fleeing || l.visiting || l.attackTarget || l.jumping || l.hp<=0 || now<l.hurtUntil){l.pickupUntil=0;l.pickupStarted=0;return false;}
+    if(l.pickupStarted>0 && now-l.pickupStarted>4.0f){
+        l.pickupSkipPos=l.pickupGoal;l.pickupSkipUntil=now+5;l.pickupUntil=0;l.pickupStarted=0;
+    }
+    if(now>=l.nextPickupSearch){
+        l.nextPickupSearch=now+0.45f;
+        l.pickupUntil=0;
+        auto candidates=ASlaiPickupTargets(l.pos+glm::vec3(0,0,65),650.0f);
+        std::sort(candidates.begin(),candidates.end(),[&](const auto& a,const auto& b){
+            if(a.heal!=b.heal)return a.heal>b.heal;
+            return Distance(a.pos,l.pos)<Distance(b.pos,l.pos);
+        });
+        for(const auto& c:candidates){
+            if(c.heal ? l.hp>=c_nSlaiMaxHP : l.coins>=5)continue;
+            if(std::abs(c.pos.z-l.pos.z)>130||!SlaiClearLine(l.pos+glm::vec3(0,0,65),c.pos))continue;
+            glm::vec3 q=c.pos;
+            if(!FDropOnGround(&q,40,-150,false)||SlaiWetPoint(q)||std::abs(q.z-l.pos.z)>65||!GroundConnection(l.pos,q))continue;
+            if(now<l.pickupSkipUntil&&Distance(q,l.pickupSkipPos)<100)continue;
+            if(l.pickupStarted==0||Distance(q,l.pickupGoal)>100)l.pickupStarted=now;
+            l.pickupGoal=q;l.pickupUntil=now+0.55f;break;
+        }
+    }
+    if(now>=l.pickupUntil){l.pickupStarted=0;return false;}
+    if(!GroundConnection(l.pos,l.pickupGoal)){l.pickupUntil=0;l.pickupStarted=0;return false;}
+    l.state="pickup";
+    const float distance=glm::length(glm::vec2(l.pickupGoal-l.pos));
+    if(distance>10){SlaiDrive(l,l.pickupGoal,std::min(c_sSlaiWalk,distance*4.0f),dt);PlayClip(l,l.walk);}
+    else {SlaiDrive(l,l.pos,0,dt);PlaySlai(l,false);}
+    return true;
+}
+
 void StepSlai(SW* psw,LIVE& l)
 {
     if(!l.plo->fInWorld||l.plo->fRemoved||l.plo==PloPoCurrent(psw))return;
@@ -894,7 +934,7 @@ void StepSlai(SW* psw,LIVE& l)
         if(l.respawnAt==0){l.respawnAt=now+6;RestartClip(l,l.defeat);}
         if(now<l.respawnAt){hold();return;}
         std::printf("Slai: respawn, HP 0 -> %d\n",c_nSlaiMaxHP);
-        l.hp=c_nSlaiMaxHP;l.respawnAt=0;l.hurtUntil=0;l.nextHit=now+2;
+        l.hp=c_nSlaiMaxHP;l.coins=0;l.pickupUntil=0;l.pickupStarted=0;l.pickupSkipUntil=0;l.nextPickupSearch=now;l.respawnAt=0;l.hurtUntil=0;l.nextHit=now+2;
         l.attackUntil=0;l.attackTarget=nullptr;l.nextCombat=0;l.fleeing=false;l.restUntil=0;
         ResetSocial(l,now,false);l.socialPlayer=nullptr;
         l.jumping=false;l.roofSecondPending=false;l.roofFlight=false;l.nextRoof=now+10;l.jumpPath=nullptr;l.nextJump=now+3;l.waterJump=false;l.waterSince=0;ResetSlaiNav(l);
@@ -994,6 +1034,8 @@ void StepSlai(SW* psw,LIVE& l)
             }
         }
     }
+    if(!l.fleeing && !l.visiting && (!l.following||l.followHolding) && StepSlaiPickup(l,now,dt))return;
+    l.pickupUntil=0;l.pickupStarted=0;
     // A visit is scheduled once, not rolled every frame. Travel and stay have distinct deadlines.
     if(!l.fleeing&&validPlayer)
     {
@@ -1522,6 +1564,36 @@ int* PnModSlaiHealth(const LO* plo)
 {
     for (LIVE& l : s_alive) if (l.fSlai && l.plo == plo) return &l.hp;
     return nullptr;
+}
+
+int NModSlaiCoins(const LO* plo)
+{
+    for(const LIVE& l:s_alive)if(l.fSlai&&l.plo==plo)return l.coins;
+    return 0;
+}
+bool FModSlaiPickupsActive()
+{
+    if(!s_pendingSlai.empty())return true;
+    for(const LIVE& l:s_alive)if(l.fSlai)return true;
+    return false;
+}
+bool FModSlaiWantsPickup(const LO* plo,bool heal)
+{
+    if(!plo||!FModSlaiTargetable(plo))return false;
+    for(const LIVE& l:s_alive)if(l.fSlai&&l.plo==plo)
+        return g_clock.t>=l.hurtUntil && (heal?l.hp<c_nSlaiMaxHP:l.coins<5);
+    return false;
+}
+bool FModSlaiTakePickup(LO* plo,bool heal,const glm::vec3& pos)
+{
+    if(!FModSlaiWantsPickup(plo,heal)||!SlaiClearLine(SlaiFeet(plo)+glm::vec3(0,0,65),pos))return false;
+    for(LIVE& l:s_alive)if(l.fSlai&&l.plo==plo){
+        if(heal){const int before=l.hp;l.hp=std::min(c_nSlaiMaxHP,l.hp+25);
+            std::printf("Slai: charm HP %d -> %d / %d\n",before,l.hp,c_nSlaiMaxHP);}
+        else{++l.coins;std::printf("Slai: coin wallet %d / 5\n",l.coins);}
+        l.pickupUntil=0;l.pickupStarted=0;l.nextPickupSearch=g_clock.t;return true;
+    }
+    return false;
 }
 
 // Called before native player damage/mission transitions. Slai owns his reaction and respawn.

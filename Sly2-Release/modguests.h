@@ -32,6 +32,10 @@ bool FModSlaiOrdinaryGuard(const LO* plo);
 inline constexpr int c_nSlaiMaxHP = 150;
 const char* SzModSlaiState(const LO* plo);
 int* PnModSlaiHealth(const LO* plo);
+int NModSlaiCoins(const LO* plo);
+bool FModSlaiPickupsActive();
+bool FModSlaiWantsPickup(const LO* plo, bool heal);
+bool FModSlaiTakePickup(LO* plo, bool heal, const glm::vec3& pos);
 
 struct CTMSG;
 bool FModSlaiAcceptDamage(LO* plo, const CTMSG* hit);

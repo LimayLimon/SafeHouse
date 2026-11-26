@@ -1,6 +1,8 @@
 // pickup.cpp: the pickups (pickup.h). Ported from the decomp's src/hand func_001C4E50 / 001C6508 / 001C60B8 /
 // 001C65F8 / 001C5E48 / 001C6588 / 001C5D18 / 001C6BD0 and the asm (0x1C5148, 0x1C55E0).
 #include "pickup.h"
+#include "modguests.h"
+#include "pccharacter.h"
 #include "envonce.h"
 #include "worldglobals.h"
 
@@ -211,6 +213,7 @@ struct PICKUP
     LO* ploExpire = nullptr;      // +0x218 (+0x214: timed expiry's message receiver)
     int fSidePrev = 0;            // +0x1BC
     float tGlint = -1e9f;         // +0x1C0
+    bool fSlaiLoose = false; // ordinary non-auto-credit dropped coin/charm
     bool fWritten = false;        // (natively: the record's local translation last written by the motion, to notice
     glm::vec3 posLocal{0.0f};     // a placement from outside (a proxy's instance placed): +0x170 taken again)
 };
@@ -380,6 +383,7 @@ void SetPickupStateBase(LO* plo, PICKUP& p, int n)
     case 3:
     case 4: p.acc = glm::vec3(0.0f, 0.0f, -2250.0f); break;  // D_002C0D60
     case 2:
+        p.fSlaiLoose = false;
         p.tCollect = FLT_MAX;
         RemoveLo(g_psw, plo);  // vt slot 9
         if (p.pproxy) UnlockProxyRowOf(g_psw, p.pproxy, plo);  // 0x1CB658 / 0x1CB4B8
@@ -446,7 +450,7 @@ void SetCoinState(LO* plo, PICKUP& p, int n)
     if (p.state == n) return;
     switch (n)
     {
-    case 0: p.dtRest = GRandInRange(p.dtRestLow, p.dtRestHigh); break;  // 0x11D448
+    case 0: p.dtRest = p.fSlaiLoose && FModSlaiPickupsActive() ? 10.0f : GRandInRange(p.dtRestLow, p.dtRestHigh); break;  // 0x11D448
     case 1:
     {
         // the flight to the counter (0x1CE888(G, 9, 0): +0xF0 D_002C0DA0, +0xF4 the coin, +0xF8 0; slot 1 at the coin's
@@ -549,7 +553,7 @@ void SetOtherPickupState(LO* plo, PICKUP& p, int n)
     if (p.state == n) return;
     switch (n)
     {
-    case 0: p.dtRest = GRandInRange(p.dtRestLow, p.dtRestHigh); break;
+    case 0: p.dtRest = p.fSlaiLoose && FModSlaiPickupsActive() && FIsLoDerivedFrom(plo,0x5D) ? 15.0f : GRandInRange(p.dtRestLow, p.dtRestHigh); break;
     case 1:
         if (FIsLoDerivedFrom(plo, 0x5D))
         {
@@ -563,7 +567,8 @@ void SetOtherPickupState(LO* plo, PICKUP& p, int n)
             const glm::mat3 mat = pxfObj ? glm::mat3(pxfObj->matWorld) : glm::mat3(1.0f);
             FLaunchHudRip(plo, PosLoWorld(plo), mat, RiphuddefCharm(), [] {});
             // slot 81 (0x144268): health +0x23C (10) and power +0x240 (20), each up to its maximum
-            HealActor(pa, static_cast<int>(plo->U32Field(0, 0x23C, 10)), static_cast<int>(plo->U32Field(0, 0x240, 20)));
+            const bool custom = p.fSlaiLoose && FModSlaiPickupsActive() && FPcCarm(PloPoCurrent(g_psw));
+            HealActor(pa, custom ? 25 : static_cast<int>(plo->U32Field(0, 0x23C, 10)), custom ? 20 : static_cast<int>(plo->U32Field(0, 0x240, 20)));
             if (p.ploCollect)
             {
                 BURSTPARAMS bp; bp.grf = 1; bp.plo = plo;
@@ -721,7 +726,23 @@ void TestPickupCollect(LO* plo, PICKUP& p)
         return;
     }
     // the players (0x1C4BD8: the current one; the other players of the gang in the world: TODO), then 0x1C5B20
-    if (FPickupTouched(plo, p, PloPoCurrent(g_psw))) SetPickupState(plo, 1);
+    // Preserve native player priority and all scripted pickup behavior.
+    if (FPickupTouched(plo, p, PloPoCurrent(g_psw))) {
+        SetPickupState(plo, 1);
+        if (p.state == 2) return;
+    }
+    if (!p.fSlaiLoose || p.tCollect != FLT_MAX || (p.state != 0 && p.state != 4 && p.state != 5)) return;
+    const bool heal = FIsLoDerivedFrom(plo,0x5D);
+    if (!heal && !FIsLoDerivedFrom(plo,0x5B)) return;
+    for (int i=0;i<CModGuestsLive();++i) {
+        LO* guest=PloModGuestLive(i);
+        if (!FModSlaiWantsPickup(guest,heal) || !FPickupTouched(plo,p,guest)) continue;
+        if (!FModSlaiTakePickup(guest,heal,PosAloCenter(static_cast<ALO*>(plo)))) continue;
+        // Native gone state returns the instance to its pool. No player HUD,
+        // progress credit, heal script or mission pickup event for this NPC.
+        SetPickupState(plo,2);
+        return;
+    }
 }
 
 // orig: 0x001C6308 (the glint: the pickup's (1, 1, 0) in its frame (0x1A6FC0) against the camera's left (CM +0x70);
@@ -943,6 +964,21 @@ void UpdatePickupMotion(LO* plo)
 
 bool FPickupLive(LO* plo) { return Ppickup(plo) != nullptr; }
 
+std::vector<SlaiPickupTarget> ASlaiPickupTargets(const glm::vec3& pos, float radius)
+{
+    std::vector<SlaiPickupTarget> out;
+    for (const auto& [obj,p] : s_mppickup) {
+        if (!obj || !p.fSlaiLoose || !p.fCollectTimed || p.tCollect != FLT_MAX ||
+            p.state != 0 || !obj->fInWorld || obj->fRemoved) continue;
+        LO* plo=const_cast<LO*>(obj);
+        const bool heal=FIsLoDerivedFrom(plo,0x5D);
+        if (!heal && !FIsLoDerivedFrom(plo,0x5B)) continue;
+        const glm::vec3 q=PosAloCenter(static_cast<ALO*>(plo));
+        if (glm::dot(q-pos,q-pos)<=radius*radius) out.push_back({q,heal});
+    }
+    return out;
+}
+
 // orig: 0x001C5FA0 (DrawPickup), before either the animated draw or the ALO
 // draw. Acquiring a pooled instance adds it before its caller launches it;
 // its pickup state may still be 2, even though it is registered/in the world.
@@ -1000,6 +1036,8 @@ void LaunchPickup(LO* plo, const glm::vec3& pos, const glm::vec3& vel, float dtS
     // (its update: the class's slot 16 (InitLo's flag; natively the proxies' instances do not get it))
     if (plo->iupd >= 0) g_psw->aupd[static_cast<size_t>(plo->iupd)].grf |= GRFUPD_Update;
     else plo->grfUpd |= GRFUPD_Update;
+    p->fSlaiLoose = dtCollect == FLT_MAX && !pproxy &&
+        (FIsLoDerivedFrom(plo,0x5B) || FIsLoDerivedFrom(plo,0x5D));
     p->dtSm = dtSm;
     p->fLanded = 0;
     SetPickupState(plo, 3);
