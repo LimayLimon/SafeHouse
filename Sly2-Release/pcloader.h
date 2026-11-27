@@ -74,6 +74,8 @@ bool FCopyKeptStep(ALO* dst,const ALO* src); // opt-in: Slai restores authored f
 // animation events. The copies' own sounds (PloPcCloneIntoWorld) find their bank by themselves.
 class CSnd;
 CSnd* PsndNewPcKept(int iwrec, int sfxid);
+// Strict source-bank lookup for Carmelita locomotion only; null if unavailable.
+CSnd* PsndNewPcCarmFootstep(int iwrec, int sfxid);
 
 // A live copy of a kept object (and its children) in the running world, started as a loaded object; fAdd: left in
 // the world, else taken out (RemoveLo) like a proxy's spare. Null if the template is null.

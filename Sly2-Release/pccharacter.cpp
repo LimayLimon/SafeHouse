@@ -348,7 +348,13 @@ void FirePuppetGlobEvents(const std::vector<ASEGEV>& aev, float t0, float t1, bo
     {
         if (ev.kind == 0 && ev.an[0] != -1 && (fAll || (ev.t > t0 && ev.t <= t1)) && FMovesetPlayer(s_pup.ploPlayer))
         {
-            CSnd* psnd = PsndNewPcKept(Adef()[s_pup.idef].iwrec, ev.an[0]);   // (her world's sound table and bank)
+            // Only Carmelita's locomotion events use the strict bank lookup.
+            // Shots, voices, and all other characters keep the previous path.
+            const bool fCarmStep = s_pup.idef >= 0 && s_pup.idef < 3 &&
+                                   (ev.an[0] == 279 || ev.an[0] == 286);
+            CSnd* psnd = fCarmStep ? PsndNewPcCarmFootstep(def.iwrec, ev.an[0])
+                                    : PsndNewPcKept(def.iwrec, ev.an[0]);
+            if (!psnd) continue;
             if (psnd->Kind() == 2) { psnd->Stop(0.0f); continue; }   // (no loopers: nothing would stop them)
             psnd->SetSource(s_pup.ploPlayer);
             psnd->SetFalloff(static_cast<float>(ev.an[2]), static_cast<float>(ev.an[3]));

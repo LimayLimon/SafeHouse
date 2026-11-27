@@ -48,6 +48,7 @@ struct KEPT
     SOUNDMGR sound;                          // its music block (its bank's key, its sound table)
     bool fOwnBank = false;                   // its bank is not the running world's: loaded (hbank, loopers in sound)
     uint32_t hbank = 0;
+    uint32_t hbankFootsteps = 0; // isolated fallback; never used by projectile/copy audio
 };
 std::vector<KEPT*> s_akept;
 bool s_fWorldStarting = false;
@@ -258,6 +259,40 @@ CSnd* PsndNewPcKept(int iwrec, int sfxid)
     int isound = -1, kind = 0;
     if (FKeptSound(iwrec, sfxid, &hbank, &isound, &kind)) return PsndNewPlainBank(sfxid, hbank, isound, kind);
     return PsndNewPlain(sfxid);
+}
+
+
+// Footsteps only: never resolve a Carmelita sound ID in an unrelated map's bank.
+CSnd* PsndNewPcCarmFootstep(int iwrec, int sfxid)
+{
+    if (sfxid != 279 && sfxid != 286) return nullptr;
+    KEPT* pk = PkFind(iwrec);
+    if (!pk || pk->pckws != PCKWS_Ready) return nullptr;
+    const SOUNDMGR& s = pk->sound;
+    if (sfxid >= int(s.aisoundFromId.size())) return nullptr;
+    const int isound = s.aisoundFromId[size_t(sfxid)];
+    if (isound < 0 || isound >= int(s.aflagsSound.size())) return nullptr;
+    uint32_t hbank = pk->hbank;
+    if (!hbank && std::memcmp(s.keyBank, g_sound.keyBank, sizeof(s.keyBank)) == 0)
+        hbank = g_sound.hbank;
+    if (!hbank)
+    {
+        // A world initially kept while it was active may no longer have its bank
+        // after a map transition. Keep a separate bank for footsteps, not for clones.
+        auto& h = pk->hbankFootsteps;
+        if (!h)
+        {
+            const FK fkBank = FkFromRecord(s.keyBank);
+            if (!fkBank.cb) return nullptr;
+            std::lock_guard<std::recursive_mutex> lock(g_mtxSound);
+            h = snd_BankLoadByLoc(fkBank.isector, 0);
+            if (h) snd_ResolveBankXREFS();
+        }
+        hbank = h;
+    }
+    if (!hbank) return nullptr;
+    if (s.aflagsSound[size_t(isound)] == 2 || snd_IsSoundALooper(hbank, isound)) return nullptr;
+    return PsndNewPlainBank(sfxid, hbank, isound, s.aflagsSound[size_t(isound)]);
 }
 
 void RequestPcKeptWorld(int iwrec)
