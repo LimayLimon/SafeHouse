@@ -4,6 +4,8 @@
 #include "activate.h"
 #include "ai.h"
 #include "aijobs.h"
+#include "nav.h"
+#include "navlink.h"
 #include "clock.h"
 #include "crv.h"
 #include "po.h"
@@ -45,6 +47,11 @@
 #include <cctype>
 #include <string>
 #include <vector>
+#include <utility>
+
+// Existing public puppet animation accessor (implemented in pccharacter.cpp).
+int OidPcPuppetAnim();
+bool FPcGuardMoves();
 
 namespace
 {
@@ -68,6 +75,18 @@ struct LIVE
     glm::vec3 blockedPos{0}, freeGoal{0};
     float blockedUntil=0, freeUntil=0, nextLocal=0, nextPad=0, nextRecovery=0;
     std::deque<SlaiFailedGoal> failedGoals;
+    // Native walkable-area route, cached as positions rather than engine pointers.
+    std::deque<glm::vec3> meshRoute;
+    glm::vec3 meshThreat{0};
+    float meshRetry=0, meshUntil=0, meshCheck=0;
+    int meshSerial=-1, meshMode=-1;
+    bool meshJump=false;
+    int meshGeneration=-1;
+    glm::mat3 floorFrame{1.f};
+    float nextFloorFit=0.f, floorFitHeading=0.f;
+    bool floorFitValid=false;
+    const KIND2* nativeJumpTiming=nullptr;
+    glm::vec3 meshLanding{0};
     glm::vec3 commandedGoal{0};
     bool hasCommandedGoal=false;
     float nextReverse=0;
@@ -85,6 +104,11 @@ struct LIVE
     ASEG* playing = nullptr;
     std::vector<ASEG*> idles, attacks;
     ASEG* restClip = nullptr;
+    ASEG* waterClip = nullptr;
+    ASEG* binocularIn = nullptr;
+    ASEG* binocularOut = nullptr;
+    int binocularPhase = 0; // 0 inactive, 1 observe, 2 put away
+    float binocularUntil = 0;
     LO* attackTarget = nullptr;
     float lastGuardSeen = 0, nextCombat = 0;
     float restUntil = 0, nextRest = 0, nextSwitch = 0;
@@ -158,13 +182,20 @@ std::mt19937 s_rng{0x534C4149u};
 constexpr float c_sSlaiWalk = 350.0f;
 constexpr float c_sSlaiRun = 700.0f;
 constexpr float c_sSlaiDetect = 2500.0f;
-constexpr float c_sSlaiObserve = 1400.0f;
+constexpr float c_sSlaiObserve = 1400.0f; // original Carmelita detection range
 constexpr float c_sSlaiSafe = 3000.0f;
 constexpr float c_sSlaiFollowStop = 900.0f, c_sSlaiFollowResume = 1500.0f;
-// An unsolicited visit stops just outside Carmelita's existing discovery radius.
+// Preserve the original comfortable visit distance; visibility alone no longer starts flight.
 constexpr float c_sSlaiVisitStop = 1500.0f, c_sSlaiVisitResume = 2100.0f;
 constexpr float c_sSlaiVisitRange = 6000.0f;
-constexpr float c_gSlaiVisual = 0.70710678f; // 90 degree horizontal FOV, character heading, not camera
+constexpr float c_gSlaiVisual = 0.70710678f; // original Carmelita 90 degree horizontal FOV, not camera
+constexpr int c_oidSlaiCarmThreat = 7727; // Carmelita's R2 gesture
+bool FSlaiCarmGestureThreat(bool visible,int anim,float heading,float dx,float dy)
+{
+    if(!visible||anim!=c_oidSlaiCarmThreat)return false;
+    const float t2=dx*dx+dy*dy;
+    return t2<1.f || std::cos(heading)*dx+std::sin(heading)*dy>=c_gSlaiVisual*std::sqrt(t2);
+}
 constexpr float c_gSlaiFollowChance = 0.30f;
 constexpr float c_gSlaiVisitChance = 0.30f;
 // Guard projectile damage cadence, not the guard's native firing animation cadence.
@@ -368,6 +399,20 @@ void RestartClip(LIVE& l, ASEG* clip)
     if (clip) if (ASEGA* a = PasegaFindAseg(clip, static_cast<ALO*>(l.plo))) RetractAsega(a);
     PlayClip(l, clip, false);
 }
+void CancelSlaiBinoculars(LIVE& l)
+{
+    if(l.binocularPhase){l.binocularPhase=0;l.binocularUntil=0;l.restUntil=0;}
+}
+bool StepSlaiBinoculars(LIVE& l,float now)
+{
+    if(l.binocularPhase==1 && now>=l.binocularUntil){
+        l.binocularPhase=2;
+        l.binocularUntil=now+ClipTime(l.binocularOut,0.5f);
+        RestartClip(l,l.binocularOut);
+    }
+    if(l.binocularPhase==2 && now>=l.binocularUntil){l.binocularPhase=0;l.binocularUntil=0;}
+    return l.binocularPhase!=0;
+}
 void FaceSlai(LIVE& l, const glm::vec3& target, float dt)
 {
     const glm::vec3 d = target - l.pos;
@@ -474,6 +519,28 @@ void SlaiDrive(LIVE& l,const glm::vec3& desired,float speed,float dt)
     // Keep vertical integration, floor contacts, collision response and angular braking native.
     step->nMotion=0; step->fNoContacts=0;
     SetStepPhysHeading(a,l.heading);
+    // Native floor fitting is opt-in until tested against the JT collision mesh.
+    // Reuse its cached heading frame instead of six terrain probes per frame.
+    if(std::getenv("SLY2N_SLAIFLOORFIT") && step->pxpFloor && speed>0.f && len>10.f){
+        const float now=g_clock.t;
+        if(now>=l.nextFloorFit || std::abs(std::remainder(l.heading-l.floorFitHeading,6.2831853f))>0.15f){
+            l.nextFloorFit=now+0.25f;l.floorFitHeading=l.heading;l.floorFitValid=false;
+            const glm::vec3 offset=glm::transpose(step->matHeading)*(l.pos-PosLoWorld(a));
+            const glm::vec3 probes[3]={offset+glm::vec3(-24,-20,0),offset+glm::vec3(36,-20,0),offset+glm::vec3(0,30,0)};
+            bool valid=true;float low=1e20f,high=-1e20f;
+            for(const auto& probe:probes){glm::vec3 q=PosLoWorld(a)+step->matHeading*probe;
+                if(!FDropOnGround(&q,40,-45,false)||SlaiWetPoint(q)){valid=false;break;}
+                low=std::min(low,q.z);high=std::max(high,q.z);}
+            if(valid&&high-low>5.f&&high-low<50.f){
+                FitStepToFloor(a,-45.f,40.f,3,probes);
+                l.floorFrame=step->matHeading;l.floorFitValid=l.floorFrame[2].z>0.8f;
+            }
+        }
+        if(l.floorFitValid){step->matHeading=l.floorFrame;
+            const glm::vec3 n=l.floorFrame[2];v.z=-(n.x*v.x+n.y*v.y)/n.z;
+            const float total=glm::length(v);if(total>speed)v*=speed/total;
+        }else SetStepPhysHeading(a,l.heading);
+    }else l.floorFitValid=false;
     step->vecVel=-glm::transpose(step->matHeading)*v;
     WakeAlo(a);
 }
@@ -494,6 +561,12 @@ bool LocalGoal(LIVE& l,const glm::vec3& desired,bool flee,bool explore,glm::vec3
         if(g_clock.t<l.blockedUntil && Distance(q,l.blockedPos)<100 && Distance(q,l.blockedPos)<=Distance(l.pos,l.blockedPos)+20)continue;
         if(SlaiFailedGoalNear(l,q,false,g_clock.t))continue;
         float score=glm::dot(v,forward)*length-std::abs(angle)*12;
+        // Prefer a route with space on both sides, rather than scraping the wall.
+        const glm::vec2 side(-v.y,v.x);
+        for(float sign:{-1.f,1.f}){
+            const glm::vec3 a=q+glm::vec3(0,0,65), b=a+glm::vec3(side*(sign*55.f),0);
+            if(!SlaiClearLine(a,b))score-=45.f;
+        }
         if(!explore)score+=(flee?1:-1)*(Distance(q,desired)-Distance(l.pos,desired));
         if(score>best){best=score;out=q;found=true;}
     }
@@ -759,6 +832,17 @@ bool PlanSlaiVertical(LIVE& l,const glm::vec3& from,const glm::vec3& to,SlaiVert
     if(!physics||!std::isfinite(physics->dvGravity.z)||physics->dvGravity.z>=-1)return false;
     const float g=-physics->dvGravity.z;
     if(d.z<=280){
+        // Optional authored clip timing, validated with the actual JT gravity and arc.
+        // Do not start K2PLAY itself: its guard event listener is not installed on JT.
+        if(l.nativeJumpTiming && std::getenv("SLY2N_SLAIK2TIMING")){
+            const float t=l.nativeJumpTiming->dt14;
+            if(std::isfinite(t)&&t>=0.25f&&t<=2.f&&span/t<=c_sSlaiRun){
+                const glm::vec3 vel(d.x/t,d.y/t,d.z/t+0.5f*g*t);
+                if(vel.z>0.f&&vel.z-g*t<0.f&&vel.z*vel.z/(2.f*g)<=480.f&&SlaiRoofArc(from,vel,g,t,true)){
+                    plan={vel,{},t,0};return true;
+                }
+            }
+        }
         // Car/ledge-sized surfaces: a forward single leap first, with room to clear the lip.
         for(float margin:{105.f,165.f,230.f,300.f}){
             if(std::max(0.f,d.z)+margin>480.f)continue;
@@ -1007,7 +1091,7 @@ bool RecoverSlaiWater(SW* psw,LIVE& l,STEP* st,float now,float dt)
             std::printf("Slai: water recovery to dry ground\n");return true;
         }
     }
-    l.state="water-recover";SlaiDrive(l,l.pos,0,dt);return true;
+    l.state="water-recover";SlaiDrive(l,l.pos,0,dt);if(l.waterClip && now>=l.hurtUntil)PlayClip(l,l.waterClip);return true;
 }
 // A small private navigation graph: allow a detour to initially run toward the player,
 // rather than insisting that every single step increases escape distance. No global navmesh yet.
@@ -1278,6 +1362,175 @@ bool StepSlaiPatrolPlan(SW* psw,LIVE& l,bool request,bool stuck,float now,float 
     }
     SlaiDrive(l,l.pos,0,dt);PlaySlai(l,false);l.lastProgress=now;l.progressPos=l.pos;l.state="patrol-plan";return true;
 }
+
+// Reuse the world's original navmesh (NAVREGION) without pretending a JT is a GUARD.
+// Physical validation remains mandatory: a guard mesh may include geometry Slai cannot use.
+void ResetSlaiMesh(LIVE& l)
+{
+    l.meshRoute.clear();l.meshJump=false;l.meshMode=-1;l.meshUntil=0;
+}
+bool SlaiMeshFloor(const glm::vec3& raw,glm::vec3& q)
+{
+    q=raw;
+    return std::isfinite(q.x)&&std::isfinite(q.y)&&std::isfinite(q.z)&&
+        FDropOnGround(&q,65,-75,false)&&std::abs(q.z-raw.z)<=75.f&&!SlaiWetPoint(q);
+}
+bool SlaiMeshLeg(LIVE& l,NAVREGION* reg,const glm::vec3& from,const glm::vec3& to)
+{
+    if(SlaiFailedGoalNear(l,to,false,g_clock.t)||!GroundConnection(from,to))return false;
+    // A mesh polygon is authoritative when both ends lie outside it. Permit leaving
+    // a polygon if a dynamic object appeared around Slai, but never enter another.
+    if(auto* poly=PpolyOnSegment(reg,from,to))
+        if(!FPolyContains(poly,from)||FPolyContains(poly,to))return false;
+    return true;
+}
+bool SlaiMeshPath(LIVE& l,NAVREGION* reg,const glm::vec3& target,std::deque<glm::vec3>& route)
+{
+    route.clear();if(!reg)return false;
+    glm::vec4 pts[48];
+    if(Distance(l.pos,target)<=260.f&&SlaiMeshLeg(l,reg,l.pos,target)&&!FNavBlocked(reg,l.pos,target,0)){
+        route.push_back(target);return true;
+    }
+    const int count=CposNavPath(reg,l.pos,target,48,pts);
+    if(count<2)return false;
+    glm::vec3 last=l.pos;
+    for(int i=1;i<count;++i){
+        glm::vec3 q(0);if(!SlaiMeshFloor(glm::vec3(pts[i]),q))return false;
+        if(Distance(last,q)<15.f)continue;
+        // Split long mesh edges: avoid undersampling ramps or intervening obstacles.
+        const int pieces=std::max(1,int(std::ceil(Distance(last,q)/260.f)));
+        if(pieces>32||route.size()+size_t(pieces)>96)return false;
+        const glm::vec3 start=last;
+        for(int j=1;j<=pieces;++j){
+            glm::vec3 p(0);if(!SlaiMeshFloor(glm::mix(start,q,float(j)/pieces),p))return false;
+            if(!SlaiMeshLeg(l,reg,last,p)){
+                // Native obstacle polygon: test a few outward corners, not an unbounded grid.
+                NAVPOLY* poly=PpolyOnSegment(reg,last,p);
+                if(!poly||poly->aposWorld.empty())return false;
+                const glm::vec2 center((poly->posMin+poly->posMax)*0.5f);
+                struct Candidate{glm::vec3 q;float cost;};std::vector<Candidate> candidates;
+                for(const auto& v:poly->aposWorld){
+                    glm::vec2 dir=glm::vec2(v)-center;float n=glm::length(dir);if(n<1.f)continue;
+                    glm::vec3 q=glm::vec3(v)+glm::vec3(dir*(48.f/n),0);q.z=last.z;
+                    candidates.push_back({q,Distance(last,q)+Distance(q,p)});
+                }
+                std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b){return a.cost<b.cost;});
+                bool found=false;int checked=0;
+                for(const auto& c:candidates){if(++checked>6)break;glm::vec3 q;
+                    if(!SlaiMeshFloor(c.q,q)||PregionAt(q,false)!=reg||FNavBlocked(reg,last,q,0)||FNavBlocked(reg,q,p,0))continue;
+                    if(!SlaiMeshLeg(l,reg,last,q)||!SlaiMeshLeg(l,reg,q,p))continue;
+                    if(route.size()>=95)return false;route.push_back(q);found=true;break;}
+                if(!found)return false;
+            }
+            route.push_back(p);last=p;
+        }
+    }
+    // CposNavPath can truncate or project a target onto a different floor.
+    if(route.empty()||Distance(last,target)>95.f){route.clear();return false;}
+    return true;
+}
+// Use simple, explicitly authored walking or jump links. Multi-record links
+// can encode pipes / scripted actions and require a dedicated adapter.
+bool SlaiMeshLink(LIVE& l,NAVREGION* reg,const glm::vec3& intent,bool away,
+                  std::deque<glm::vec3>& route,glm::vec3& landing,bool& jump)
+{
+    jump=false;if(!reg)return false;
+    float best=-1e20f;bool found=false;
+    int tested=0;
+    for(NAVLINK* link:AplinkWorld()){
+        if(!link||!link->fResolved||(link->kind!=0&&link->kind!=1)||link->pregionBegin!=reg||link->agoal.size()!=2)continue;
+        const bool isJump=link->kind==1;
+        if(isJump&&g_clock.t<l.nextJump)continue;
+        if(link->agoal[0].plo||link->agoal[1].plo)continue;
+        glm::vec3 from(0),to(0);
+        if(!SlaiMeshFloor(link->posBegin,from)||!SlaiMeshFloor(link->posEnd,to)||Distance(l.pos,from)>550.f||
+           SlaiFailedGoalNear(l,to,isJump,g_clock.t))continue;
+        const float gain=(away?-1.f:1.f)*(Distance(l.pos,intent)-Distance(to,intent));
+        if(gain<40.f)continue;
+        if(++tested>6)break;
+        if(isJump){SlaiVerticalPlan plan;if(!PlanSlaiVertical(l,from,to,plan))continue;}
+        else if(!GroundConnection(from,to))continue;
+        std::deque<glm::vec3> candidate;
+        if(Distance(l.pos,from)>18.f){
+            if(GroundConnection(l.pos,from))candidate.push_back(from);
+            else if(!SlaiMeshPath(l,reg,from,candidate))continue;
+        }
+        // Store the exact validated takeoff as the final waypoint, not just its projected triangle.
+        if(!candidate.empty()&&Distance(candidate.back(),from)>12.f){
+            if(!GroundConnection(candidate.back(),from))continue;
+            candidate.push_back(from);
+        }
+        if(!isJump)candidate.push_back(to);
+        const float score=gain-0.35f*Distance(l.pos,from)-(isJump?55.f:0.f);
+        if(score>best){best=score;route=std::move(candidate);landing=to;found=true;jump=isJump;}
+    }
+    return found;
+}
+bool StepSlaiMesh(LIVE& l,const glm::vec3& intent,bool interested,bool away,bool stuck,bool request,float speed,float now,float dt)
+{
+    const int mode=away?2:interested?1:0;
+    if(l.meshMode!=mode||l.meshGeneration!=NGenNav()||l.meshSerial!=NNavLinkSerial()||now>=l.meshUntil||
+       (interested&&!away&&Distance(intent,l.meshThreat)>500.f))ResetSlaiMesh(l);
+    auto reject=[&]{ResetSlaiMesh(l);l.meshRetry=now+2.f;return false;};
+    if(l.meshMode>=0){
+        if(stuck){if(!l.meshRoute.empty())RememberSlaiFailure(l,l.meshRoute.front(),false,now);return reject();}
+        while(!l.meshRoute.empty()&&Distance(l.pos,l.meshRoute.front())<(l.meshJump&&l.meshRoute.size()==1?18.f:30.f)){l.meshRoute.pop_front();l.meshCheck=0;}
+        if(!l.meshRoute.empty()){
+            const auto q=l.meshRoute.front();
+            if(now>=l.meshCheck){
+                l.meshCheck=now+0.18f;
+                NAVREGION* current=PregionAt(l.pos,false);
+                const bool clear=current&&PregionAt(q,false)==current?SlaiMeshLeg(l,current,l.pos,q):GroundConnection(l.pos,q);
+                if(!clear){RememberSlaiFailure(l,q,false,now);return reject();}
+            }
+            SlaiDrive(l,q,speed,dt);PlayClip(l,away&&l.run?l.run:l.walk);l.state="mesh-walk";return true;
+        }
+        if(l.meshJump){
+            const auto to=l.meshLanding;ResetSlaiMesh(l);
+            if(now<l.nextJump)return reject();
+            // Revalidate with the existing physical jump driver at the actual launch position.
+            l.verticalFrom=l.pos;l.verticalTo=to;l.verticalIntent=intent;l.verticalAway=away;
+            l.verticalApproach=true;l.verticalUntil=now+1.f;
+            if(StepSlaiVertical(l,intent,away,now,dt)){l.meshRetry=now+2.f;return true;}
+            RememberSlaiFailure(l,to,true,now);return reject();
+        }
+        return reject();
+    }
+    if(!request||now<l.meshRetry)return false;
+    l.meshRetry=now+2.f;
+    STEP* st=PstepFromLo(l.plo);if(!st||!st->pxpFloor)return false;
+    NAVREGION* reg=PregionAt(l.pos,false);if(!reg)return false;
+    // First try a path in the same region. For escape, favour endpoints away from the player,
+    // but allow the intermediate route to go around an obstruction in either direction.
+    glm::vec2 dir(intent-l.pos);if(away)dir=-dir;
+    if(glm::length(dir)<1.f)dir=glm::vec2(std::cos(l.heading),std::sin(l.heading));else dir=glm::normalize(dir);
+    const glm::vec2 side(-dir.y,dir.x);
+    bool found=false;
+    // A target on another authored floor deserves a real link before random local steps.
+    if(!away&&std::abs(intent.z-l.pos.z)>100.f&&PregionAt(intent,false)!=reg){
+        found=SlaiMeshLink(l,reg,intent,false,l.meshRoute,l.meshLanding,l.meshJump);
+    }
+    for(float angle:{0.f,0.8f,-0.8f,1.55f,-1.55f}){
+        if(found)break;
+        const glm::vec2 f=dir*std::cos(angle)+side*std::sin(angle);
+        glm::vec3 raw=l.pos+glm::vec3(f*360.f,0),q(0),floor(0);
+        if(!away&&Distance(l.pos,intent)<360.f&&angle==0.f)raw=intent;
+        if(!FKeepOnNav(reg,raw,&q)||!SlaiMeshFloor(q,floor)||Distance(l.pos,floor)<80.f||
+           PregionAt(floor,false)!=reg)continue;
+        if(away&&Distance(floor,intent)<Distance(l.pos,intent)+25.f)continue;
+        if(SlaiMeshPath(l,reg,floor,l.meshRoute)){found=true;break;}
+    }
+    if(!found){
+        if(!SlaiMeshLink(l,reg,intent,away,l.meshRoute,l.meshLanding,l.meshJump))return false;
+        found=true;
+    }
+    l.meshMode=mode;l.meshGeneration=NGenNav();l.meshSerial=NNavLinkSerial();l.meshThreat=intent;l.meshUntil=now+8.f;l.meshCheck=0;
+    l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
+    l.freeUntil=0;ResetSlaiPatrolPlan(l);ResetSlaiNav(l);l.verticalApproach=false;
+    if(FPrint())std::printf("Slai: native mesh %s, %zu waypoints\n",l.meshJump?"jump link":"walk",l.meshRoute.size());
+    return StepSlaiMesh(l,intent,interested,away,false,false,speed,now,dt);
+}
+
 void StepSlai(SW* psw,LIVE& l)
 {
     if(!l.plo->fInWorld||l.plo->fRemoved||l.plo==PloPoCurrent(psw))return;
@@ -1295,10 +1548,11 @@ void StepSlai(SW* psw,LIVE& l)
         if(now<l.respawnAt){hold();return;}
         std::printf("Slai: respawn, HP 0 -> %d\n",c_nSlaiMaxHP);
         l.hp=c_nSlaiMaxHP;l.coins=0;l.pickupUntil=0;l.pickupStarted=0;l.pickupSkipUntil=0;l.nextPickupSearch=now;l.respawnAt=0;l.hurtUntil=0;l.nextHit=now+2;l.nextGuardProjectileHit=now+2;
-        l.attackUntil=0;l.attackTarget=nullptr;l.nextCombat=0;l.fleeing=false;l.restUntil=0;
+        CancelSlaiBinoculars(l);l.attackUntil=0;l.attackTarget=nullptr;l.nextCombat=0;l.fleeing=false;l.restUntil=0;
         ResetSocial(l,now,false);l.socialPlayer=nullptr;
         l.verticalApproach=false;l.verticalFlight=false;l.nextVertical=now+3;l.jumping=false;l.jumpRecoveryAirborne=false;l.roofSecondPending=false;l.roofFlight=false;l.jumpPath=nullptr;l.nextJump=now+3;l.waterJump=false;l.waterCrossFlight=false;l.nextWaterCrossProbe=now+3;l.waterSince=0;ResetSlaiNav(l);
         l.path=l.spawnPath;l.s=l.spawnS;l.pos=l.spawn;l.heading=l.spawnHeading;
+        ResetSlaiMesh(l);l.meshRetry=0;l.floorFitValid=false;l.nextFloorFit=0;
         l.recentPaths.clear();l.failedGoals.clear();l.hasCommandedGoal=false;l.nextReverse=now;l.nextRecovery=0;l.blockedUntil=0;l.freeUntil=0;l.nextLocal=now;l.nextPad=now+3;l.routeSince=now;l.lastProgress=now;l.nextProgressCheck=now+0.5f;l.progressPos=l.spawn;
         l.nextRest=now+SlaiExploreTime();l.nextSearch=now;l.nextSwitch=now+3;
         PlaceAt(l.plo,l.spawn,l.heading);PlaySlai(l,false);hold();return;
@@ -1314,8 +1568,8 @@ void StepSlai(SW* psw,LIVE& l)
         ResetSocial(l,now,false);
         PlaceAt(l.plo,q,l.heading);hold();return;
     }
-    if(RecoverSlaiWater(psw,l,step,now,dt)){ResetSlaiPatrolPlan(l);return;}
-    if(StepSlaiJump(psw,l,step,now)){ResetSlaiPatrolPlan(l);if(!l.jumping)return;l.state=l.verticalFlight?l.verticalState:l.roofFlight?(l.roofSecondPending?"roof-jump":"roof-double"):"jump";return;}
+    if(RecoverSlaiWater(psw,l,step,now,dt)){CancelSlaiBinoculars(l);ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);return;}
+    if(StepSlaiJump(psw,l,step,now)){CancelSlaiBinoculars(l);ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);if(!l.jumping)return;l.state=l.verticalFlight?l.verticalState:l.roofFlight?(l.roofSecondPending?"roof-jump":"roof-double"):"jump";return;}
     // Save a dry, stable location, not a water surface or submerged floor.
     if(step->pxpFloor && now>=l.nextDrySample){
         l.nextDrySample=now+0.35f;glm::vec3 q=l.pos;
@@ -1327,14 +1581,14 @@ void StepSlai(SW* psw,LIVE& l)
     }
     if(l.hasSafePos && !step->pxpFloor && l.pos.z<l.safePos.z-350)
     {
-        ResetSlaiPatrolPlan(l);l.jumpRecoveryAirborne=false;l.pos=l.safePos;PlaceAt(l.plo,l.pos,l.heading);l.path=nullptr;l.nextSearch=now;l.lastProgress=now;hold();return;
+        ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);l.jumpRecoveryAirborne=false;l.pos=l.safePos;PlaceAt(l.plo,l.pos,l.heading);l.path=nullptr;l.nextSearch=now;l.lastProgress=now;hold();return;
     }
     if(step->pxpFloor)l.jumpRecoveryAirborne=false;
     if(l.jumpRecoveryAirborne && !step->pxpFloor && now>=l.hurtUntil){
         ResetSlaiPatrolPlan(l);l.verticalApproach=false;l.state="airborne-recover";
         step->nMotion=-1;step->vecVel=glm::vec3(0);return;
     }
-    if(now<l.hurtUntil){ResetSlaiPatrolPlan(l);l.verticalApproach=false;l.state="hurt";l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;hold();return;}
+    if(now<l.hurtUntil){CancelSlaiBinoculars(l);ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);l.verticalApproach=false;l.state="hurt";l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;hold();return;}
     ScanSlaiPads(psw,l);
     if(!l.path && now>=l.nextSearch){l.nextSearch=now+0.5f;if(StartSlaiPath(psw,l)){l.routeSince=now;}}
     const CRV* c=PcrvFromLo(l.path);
@@ -1353,18 +1607,22 @@ void StepSlai(SW* psw,LIVE& l)
     const glm::vec3 eye=l.pos+glm::vec3(0,0,65);
     const float d=validPlayer?Distance(pp,eye):1e10f;
     const bool seen=validPlayer&&d<=c_sSlaiDetect&&SlaiClearLine(eye,pp);
-    bool discovered=false;
-    if(carm&&seen&&d<=c_sSlaiObserve)if(STEP* st=PstepFromLo(player))
-    {
-        const float rad=RadStepHeading(st);const glm::vec2 f(std::cos(rad),std::sin(rad)),to(eye.x-pp.x,eye.y-pp.y);
-        const float t2=glm::dot(to,to);discovered=t2<1||glm::dot(f,to)>=c_gSlaiVisual*std::sqrt(t2);
-    }
+    // Trigger only while the actual R2 gesture is active and Slai is inside
+    // Carmelita's original discovery cone. Slai's own facing is irrelevant.
+    bool threat=false;
+    if(carm&&!FPcGuardMoves()&&seen&&d<=c_sSlaiObserve)
+        if(STEP* st=PstepFromLo(player))
+            threat=FSlaiCarmGestureThreat(true,OidPcPuppetAnim(),
+                RadStepHeading(st),eye.x-pp.x,eye.y-pp.y);
     if(!carm||d>=c_sSlaiSafe){l.fleeing=false;ResetSlaiNav(l);}
-    else if(discovered&&!l.fleeing){
+    else if(threat&&!l.fleeing){
         l.fleeing=true;l.nextDirection=now;l.freeUntil=0;l.nextLocal=now;l.verticalApproach=false;
+        ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);ResetSlaiNav(l);
         l.lastProgress=now;l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
+        std::printf("Slai: in Carmelita discovery cone during R2, fleeing\n");
     }
     if(l.fleeing){
+        CancelSlaiBinoculars(l);
         if(l.following||l.visiting||l.followHolding)ResetSocial(l,now,true);
         l.attackUntil=0;l.attackTarget=nullptr;l.restUntil=0;
     }
@@ -1373,7 +1631,7 @@ void StepSlai(SW* psw,LIVE& l)
     {
         if(!LiveGuard(l.attackTarget)){if(l.attackTarget)l.nextCombat=now+RandomRange(4,10);l.attackTarget=nullptr;l.attackUntil=0;}
         if(!l.attackTarget&&now>=l.nextCombat&&!l.attacks.empty()){l.attackTarget=NearbyGuard(l.pos);if(l.attackTarget)l.lastGuardSeen=now;}
-        if(StepSlaiPickup(l,now,dt,l.attackTarget!=nullptr)){ResetSlaiPatrolPlan(l);l.verticalApproach=false;return;}
+        if(StepSlaiPickup(l,now,dt,l.attackTarget!=nullptr)){CancelSlaiBinoculars(l);ResetSlaiPatrolPlan(l);l.verticalApproach=false;return;}
         if(l.attackTarget)
         {
             l.verticalApproach=false;
@@ -1383,7 +1641,7 @@ void StepSlai(SW* psw,LIVE& l)
             else
             {
                 if(l.visiting||l.following||l.followHolding)ResetSocial(l,now,true);
-                ResetSlaiPatrolPlan(l);l.state="combat";l.restUntil=0;l.lastProgress=now;FaceSlai(l,target,dt);
+                CancelSlaiBinoculars(l);ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);l.state="combat";l.restUntil=0;l.lastProgress=now;FaceSlai(l,target,dt);
                 if(now<l.attackUntil){if(!l.struck&&now>=l.strikeAt){l.struck=true;StrikeSlai(l);}hold();return;}
                 const glm::vec3 v=target-l.pos;const float angle=std::abs(std::remainder(std::atan2(v.y,v.x)-RadStepHeading(step),6.2831853f));
                 if(clear&&dist<=190&&angle<0.45f&&now>=l.nextAttack&&!l.attacks.empty())
@@ -1445,7 +1703,7 @@ void StepSlai(SW* psw,LIVE& l)
     }
     const bool follow=validPlayer&&!l.fleeing&&l.following;
     const bool interested=follow||l.fleeing;
-    if(interested)ResetSlaiPatrolPlan(l);
+    if(interested){CancelSlaiBinoculars(l);ResetSlaiPatrolPlan(l);}
     float speed=c_sSlaiWalk;bool move=true;
     if(interested)
     {
@@ -1483,13 +1741,34 @@ void StepSlai(SW* psw,LIVE& l)
     }
     else
     {
-        if(now>=l.nextRest&&now>=l.restUntil){l.restUntil=now+SlaiRestTime();l.nextRest=l.restUntil+SlaiExploreTime();l.restClip=l.idles.empty()?l.idle:l.idles[std::uniform_int_distribution<size_t>(0,l.idles.size()-1)(s_rng)];}
-        if(now<l.restUntil){ResetSlaiPatrolPlan(l);l.verticalApproach=false;l.state="rest";hold();PlayClip(l,l.restClip);l.lastProgress=now;return;}
+        if(now>=l.nextRest&&now>=l.restUntil){
+            CancelSlaiBinoculars(l);
+            l.restUntil=now+SlaiRestTime();l.nextRest=l.restUntil+SlaiExploreTime();
+            l.restClip=l.idles.empty()?l.idle:l.idles[std::uniform_int_distribution<size_t>(0,l.idles.size()-1)(s_rng)];
+            // A single roll per existing rest; never extend a rest or interrupt movement.
+            if(step->pxpFloor && l.binocularIn && l.binocularOut &&
+                l.restUntil-now>=ClipTime(l.binocularIn,1.f)+ClipTime(l.binocularOut,0.5f)+0.25f && RandomRange(0,1)<0.15f){
+                l.binocularPhase=1;l.binocularUntil=now+ClipTime(l.binocularIn,1.f);
+                RestartClip(l,l.binocularIn);
+            }
+        }
+        if(now<l.restUntil){ResetSlaiMesh(l);ResetSlaiPatrolPlan(l);l.verticalApproach=false;l.state="rest";hold();
+            if(!step->pxpFloor)CancelSlaiBinoculars(l);
+            if(!StepSlaiBinoculars(l,now))PlayClip(l,l.restClip);
+            l.lastProgress=now;return;}
+        CancelSlaiBinoculars(l);
     }
-    if(!move){l.verticalApproach=false;l.state=l.visiting?"visit-rest":"observe";hold();l.actualSpeed=0;PlaySlai(l,false);l.lastProgress=now;l.progressPos=l.pos;return;}
+    if(!move){ResetSlaiMesh(l);l.verticalApproach=false;l.state=l.visiting?"visit-rest":"observe";hold();l.actualSpeed=0;PlaySlai(l,false);l.lastProgress=now;l.progressPos=l.pos;return;}
     if(now>=l.nextProgressCheck)
     {
-        if(glm::length(glm::vec2(l.pos-l.progressPos))>25)l.lastProgress=now;
+        const glm::vec2 moved(l.pos-l.progressPos);
+        if(l.hasCommandedGoal){
+            const glm::vec2 toward(l.commandedGoal-l.progressPos);
+            const float len=glm::length(toward);
+            // Test useful progress along the commanded direction, not sideways sliding.
+            const float gain=len-glm::length(glm::vec2(l.commandedGoal-l.pos));
+            if((len<30.f&&gain>3.f)||gain>std::min(20.f,len*0.35f))l.lastProgress=now;
+        }else if(glm::length(moved)>25.f)l.lastProgress=now;
         l.progressPos=l.pos;l.nextProgressCheck=now+0.5f;
     }
     const bool stuck=now-l.lastProgress>0.85f, old=now-l.routeSince>30.0f;
@@ -1503,6 +1782,10 @@ void StepSlai(SW* psw,LIVE& l)
             if(nearby&&SamplePath(PcrvFromLo(nearby),ns,routeGoal))verticalGoal=routeGoal;}
     }
     if(l.verticalApproach&&!interested&&!l.verticalAway)verticalGoal=l.verticalIntent;
+    // Prefer the authored navmesh before the synthetic graph or speculative climbing.
+    const bool requestMesh=stuck||(!c&&!interested)||
+        (follow&&!l.verticalApproach&&now>=l.meshRetry&&Distance(l.pos,pp)<1200.f&&!GroundConnection(l.pos,verticalGoal));
+    if(!l.verticalApproach&&StepSlaiMesh(l,interested?pp:verticalGoal,interested,l.fleeing,stuck,requestMesh,speed,now,dt))return;
     // Keep moving on valid patrol/local routes; use the graph only after real lack of progress.
     if(!interested&&!l.verticalApproach&&l.patrolNodes.empty()&&!l.patrolTarget&&TrySlaiPatrolWater(l,c,now))return;
     if(!interested&&!l.verticalApproach&&StepSlaiPatrolPlan(psw,l,stuck,stuck,now,dt))return;
@@ -1703,6 +1986,20 @@ void StartSlaiGuest(SW* psw, LIVE& l)
     l.idle = dynamic_cast<ASEG*>(PloKeptFind(iwrec, 4576, 0x6D));
     auto clip = [&](int oid) { return dynamic_cast<ASEG*>(PloKeptFind(iwrec, oid, 0x6D)); };
     l.run=clip(126); l.jumpClip=clip(152); l.doubleJumpClip=clip(160); l.hurt=clip(222); l.shock=clip(223); l.defeat=clip(231);
+    l.waterClip=clip(225);l.binocularIn=clip(235);l.binocularOut=clip(236);
+    // Inventory only: special traversal requires attachment/physics controllers.
+    if(std::getenv("SLY2N_SLAICLIPS")){
+        for(int oid:{172,174,189,171,257,260,149,154,147,158,146,4566,152,153,161,160,225,222,235,236})
+            std::printf("Slai: ASEG %d %s\n",oid,clip(oid)?"found":"missing");
+    }
+    // Native resolver checks the three K2 event markers. Never play an unverified guard clip on Sly.
+    l.nativeJumpTiming=nullptr;
+    for(ASEG* candidate:{l.jumpClip,l.doubleJumpClip})if(candidate){
+        const KIND2* k=Pk2ResolveAlo(palo,candidate);
+        const bool valid=k&&std::isfinite(k->dt14)&&k->t22<k->t23&&k->t23<k->t24&&k->dt14>=0.25f&&k->dt14<=2.f;
+        std::printf("Slai: ASEG %d native K2 markers %s\n",candidate->oid,valid?"compatible":"missing/invalid");
+        if(valid&&candidate==l.jumpClip)l.nativeJumpTiming=k;
+    }
     l.combatIdle=clip(5568); l.combatWalk=clip(129);
     for(int oid : {4576,4560,5543,5546,5552,5539}) if(auto* a=clip(oid)) l.idles.push_back(a);
     for(int oid : {291,290,288,287}) if(auto* a=clip(oid)) l.attacks.push_back(a);
@@ -2064,7 +2361,7 @@ bool FModSlaiAcceptDamage(LO* plo, const CTMSG* hit)
         const int64_t damage=electric?20:-int64_t(hit->nState);
         l.hp -= int(std::min<int64_t>(l.hp,damage));
         std::printf("Slai: hit from %d, %s, damage %d, HP %d -> %d / %d\n",hit->ploSender->oid,electric?"electric":"normal",before-l.hp,before,l.hp,c_nSlaiMaxHP);
-        l.nextHit=g_clock.t+1.0f; l.attackUntil=0; l.restUntil=0;
+        CancelSlaiBinoculars(l);l.nextHit=g_clock.t+1.0f; l.attackUntil=0; l.restUntil=0;
         if(l.visiting||l.following||l.followHolding)ResetSocial(l,g_clock.t,true);
         if(STEP* step=PstepFromLo(l.plo)) step->vecVel=glm::vec3(0);
         LO* attacker=hit->ploSender;
