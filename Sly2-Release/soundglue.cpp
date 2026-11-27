@@ -405,10 +405,36 @@ void OnAmbientUnregistered(LO* plo)
 void CloneAmbientSoundRecords(const LO* source, LO* target)
 {
     const auto it = s_mpamb.find(const_cast<LO*>(source));
-    if (it == s_mpamb.end()) return;
-    AMBREC& r = s_mpamb[target];
-    r.asnd = it->second.asnd;
-    r.afall = it->second.afall;
+    if (it != s_mpamb.end())
+    {
+        // Copy values before inserting: unordered_map insertion can invalidate the iterator.
+        const auto asnd = it->second.asnd;
+        const auto afall = it->second.afall;
+        AMBREC& r = s_mpamb[target];
+        r.asnd = asnd;
+        r.afall = afall;
+        return;
+    }
+
+    // PC kept-world loading releases its temporary runtime tables. The original
+    // ambient records are still in the template's aopt (EOPID 99 / 100).
+    // Replay just these two native load methods, not the object's other options.
+    if (!source || !target || !FIsLoDerivedFrom(source, 0x2B)) return;
+    for (const OPT& opt : source->aopt)
+    {
+        const uint32_t thunk = opt.eopid == 99 ? 0x101768u :
+                               opt.eopid == 100 ? 0x101848u : 0u;
+        if (!thunk || opt.aval.size() != (opt.eopid == 99 ? 5u : 4u)) continue;
+        if (PFNOBJMETHOD pfn = PfnObjectMethod(thunk))
+        {
+            std::vector<CRef> args;
+            for (const OPTVAL& v : opt.aval) args.push_back(RefFromOptionValue(v));
+            pfn(target, args);
+            if (std::getenv("SLY2N_SNDLOG") && opt.eopid == 99)
+                std::printf("sound: restored cloned ambient %d sound %d from template options\n",
+                            target->oid, NArg(args, 0));
+        }
+    }
 }
 
 // A world's end: the records go with its objects.
