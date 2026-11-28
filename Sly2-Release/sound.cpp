@@ -10,7 +10,6 @@
 extern int g_iframeMain;  // (game.cpp: debug prints)
 
 #include "audio.h"
-#include "flacfile.h"
 #include "bis.h"
 #include "clock.h"
 #include "loadtrace.h"
@@ -18,6 +17,7 @@ extern int g_iframeMain;  // (game.cpp: debug prints)
 #include "spiop.h"
 #include "langstore.h"
 #include "splicetypes.h"
+#include "textmod.h"
 
 #include <unordered_set>
 #include <algorithm>
@@ -42,26 +42,6 @@ std::deque<SNDSTREAM> s_adialogOld, s_amusicOld;
 std::vector<std::unique_ptr<SNDSTREAM>> s_apresidentOld;
 
 float GLimit01(float g) { return std::clamp(g, 0.0f, 1.0f); }
-
-// Optional player-controlled Carmelita barks, independent of the mission dialog stream.
-std::unique_ptr<CPcmStream> s_pcCarmVoice;
-
-void StopPcCarmVoiceLocked()
-{
-    s_pcCarmVoice.reset();
-}
-
-void UpdatePcCarmVoiceLocked(bool fRunning)
-{
-    if (!s_pcCarmVoice) return;
-    if (!fRunning || g_sound.sndDialog || s_pcCarmVoice->CBufferQueued() == 0)
-    {
-        StopPcCarmVoiceLocked();
-        return;
-    }
-    const float g = GLimit01(g_sound.agChannel[2]);
-    s_pcCarmVoice->SetLevels(kStreamGain * g * g, kStreamGain * g * g);
-}
 
 // ps2_cvt_w: float to int, truncating (the volume compares at 1/1024)
 int CvtW(float g) { return static_cast<int>(g); }
@@ -868,7 +848,6 @@ CSnd::~CSnd() { std::lock_guard<std::recursive_mutex> lock(g_mtxSound); SetSndLi
 void StopSoundsForMovie()
 {
     std::lock_guard<std::recursive_mutex> lock(g_mtxSound);
-    StopPcCarmVoiceLocked();
     snd_StopAllSounds();
     SpiopStopAll();
     ResetSoundVolumes();
@@ -878,7 +857,6 @@ void StopSoundsForMovie()
 void ResetSoundMgr()
 {
     std::lock_guard<std::recursive_mutex> lock(g_mtxSound);
-    StopPcCarmVoiceLocked();
     snd_StopAllSounds();
     SpiopStopAll();
     SOUNDMGR& s = g_sound;
@@ -1023,6 +1001,22 @@ void LoadMusicFromBrx(CBinaryInputStream* pbis)
         o.id = pbis->S16Read();
         pbis->ReadRecord64(o.key, KEYK_Music, o.id);  // 0x118458
         o.fk = FkFromRecord(o.key);
+        const FK local = g_disc.FkVeniceMusic(g_isectorWorldLoading, o.id);
+        if (local.cb) o.fk = local;
+        s.amusic.push_back(std::move(o));
+    }
+    // A custom world may have no music entries at all. Add the local streams
+    // without changing the original sound block or the global Paris music.
+    for (const int id : {0, 6, 28, 46, 48, 49})
+    {
+        const FK local = g_disc.FkVeniceMusic(g_isectorWorldLoading, id);
+        if (!local.cb) continue;
+        const auto it = std::find_if(s.amusic.begin(), s.amusic.end(),
+            [id](const SNDSTREAM& m) { return m.id == id; });
+        if (it != s.amusic.end()) continue;
+        SNDSTREAM o;
+        o.id = id;
+        o.fk = local;
         s.amusic.push_back(std::move(o));
     }
 }
@@ -1143,55 +1137,11 @@ void StopDialog()
     s.oidDialogSpeaker = -1;
 }
 
-// Play a short original Spanish voice line directly from the shared language installation.
-// Does not register a mission dialog, fire its events, or occupy the native dialog track.
-bool FPlayPcCarmVoice(int id)
-{
-    std::lock_guard<std::recursive_mutex> lock(g_mtxSound);
-    // Original Spanish language folders, independent of the current game world.
-    const char* szDialogDir = nullptr;
-    switch (id)
-    {
-    case 1229: case 1230: case 1231: case 1238: case 1241:
-        szDialogDir = "Cairo Museum";
-        break;
-    case 1228: case 2533: case 2536: case 2539: case 2542: case 2544:
-        szDialogDir = "Shared";
-        break;
-    default:
-        return false;
-    }
-    if (g_sound.sndDialog || g_sound.fMusicPaused ||
-        (g_sndhooks.pfnFGameRunning && !g_sndhooks.pfnFGameRunning())) return false;
-    if (s_pcCarmVoice && s_pcCarmVoice->CBufferQueued() > 0) return false;
-    StopPcCarmVoiceLocked();
-    if (g_disc.DirLanguages().empty()) return false;
-    const std::string path = g_disc.DirLanguages() + "/Spanish/Dialog/" + szDialogDir + "/" + std::to_string(id) + ".flac";
-    int rate = 0, cch = 0;
-    std::vector<int16_t> samples;
-    std::string error;
-    if (!FLoadFlac(path, rate, cch, samples, &error) || rate <= 0 ||
-        cch < 1 || cch > 2 || samples.empty() || samples.size() % static_cast<size_t>(cch) != 0)
-    {
-        std::fprintf(stderr, "pc Carmelita voice %d: cannot load %s (%s)\n", id, path.c_str(), error.c_str());
-        return false;
-    }
-    auto voice = std::make_unique<CPcmStream>();
-    if (!voice->FOpen(cch, rate)) return false;
-    const float g = GLimit01(g_sound.agChannel[2]);
-    voice->SetLevels(kStreamGain * g * g, kStreamGain * g * g);
-    if (!voice->FPush(samples.data(), samples.size() / static_cast<size_t>(cch), true)) return false;
-    voice->Start();
-    s_pcCarmVoice = std::move(voice);
-    return true;
-}
-
 // orig: 0x1FE5F0 (starts dialog line k (its constructor starts it): the old one ends, the line announced unless
 // fQuiet (subtitles))
 CSndVoice* PsndStartDialog(int k, int fQuiet)
 {
     std::lock_guard<std::recursive_mutex> lock(g_mtxSound);
-    StopPcCarmVoiceLocked();  // scripted dialog always takes precedence
     StopDialog();
     if (SLY2N_ENV("SLY2N_SNDLOG")) std::printf("sound: dialog %d%s\n", k, fQuiet ? " (quiet)" : "");
     static const bool s_fSubPrint = SLY2N_ENV("SLY2N_SUBPRINT") != nullptr;   // (debug: each line's text)
@@ -1605,7 +1555,6 @@ void UpdateSoundMgr(float dt, float dtFrame)
     // (0x1FDBA8: 'SUKR' 12, the disc tray (UpdateCd's +0xA4); the PC has no tray)
     CSnd* top = PvoiceTop();
     const bool fRunning = !g_sndhooks.pfnFGameRunning || g_sndhooks.pfnFGameRunning();
-    UpdatePcCarmVoiceLocked(fRunning && !g_fSkipCutFast);
     if (fRunning)
     {
         if (s.fMusicPaused)
@@ -1710,6 +1659,13 @@ bool FLoadWorldBytes(const std::string& arg, const std::string& dirMaps, WORLDBY
         pw->fk = FkFromRecord(g_disc.PbElf(VA_FK_FRONTEND, 0x40));
         *pmap = dirMaps + "/w1/map/file-2.map";
     }
+    else if (arg == "Venice" && g_disc.IsectorOfWorldName(arg) != 0)
+    {
+        pw->name = arg;
+        pw->fk.isector = g_disc.IsectorOfWorldName(arg);
+        pw->fk.cb = 1;  // a package world is assembled from its index, not read as a raw disc extent
+        pmap->clear();
+    }
     else if (const auto colon = arg.find(':'); colon != std::string::npos)
     {
         pw->name = arg;
@@ -1779,6 +1735,7 @@ bool FLoadWorldSound(const std::string& arg, const std::string& dirMaps, WORLDBY
     CLoadTrace trace(&bis);
     g_ploadtrace = &trace;
     ResetSoundMgr();
+    g_isectorWorldLoading = pw->fk.isector;
     LoadMusicFromBrx(&bis);
     g_ploadtrace = nullptr;
     const std::size_t ibEnd = bis.m_ib;
@@ -1933,3 +1890,4 @@ int IdMusicTop(int* pcStack)
     const CSndVoice* p = g_sound.asndMusic.empty() ? nullptr : static_cast<CSndVoice*>(g_sound.asndMusic.back().get());
     return p && p->m_pstream ? p->m_pstream->id : -1;
 }
+

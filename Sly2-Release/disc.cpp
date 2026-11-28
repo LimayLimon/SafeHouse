@@ -300,6 +300,7 @@ bool CDisc::FOpenConverted(const std::string& dir, std::string& error)
         m_mpCustomTask.clear();
         m_mpCutsceneRule.clear();
         m_amodworld.clear();
+        m_veniceMusic.clear();
         m_amapstate.clear();
         m_aentry.clear();
         m_aguest.erase(std::remove_if(m_aguest.begin(), m_aguest.end(), [](const cane::mods::Guest& g) { return g.id.rfind("cli-", 0) != 0; }), m_aguest.end());
@@ -511,10 +512,36 @@ void CDisc::AddPackageWorlds(const cane::mods::Manifest& m)
         const auto it = std::lower_bound(m_afile.begin(), m_afile.end(), mw.isector, [](const auto& e, uint32_t s) { return e.first < s; });
         m_afile.insert(it, {mw.isector, std::move(ent)});
         m_mpsectorWorldName[mw.isector] = w.name;
+        // Custom Venice audio, kept separate from the installed music table.
+        if (w.name == "Venice")
+        {
+            const auto musicDir = (m.filesDir() / cane::path(w.index)).parent_path() / "Music";
+            for (const int id : {0, 6, 28, 46, 48, 49})
+            {
+                const auto path = musicDir / (std::to_string(id) + ".vpk");
+                std::error_code ec;
+                if (!std::filesystem::is_regular_file(cane::paths::ioPath(path), ec) || ec) continue;
+                const auto size = std::filesystem::file_size(cane::paths::ioPath(path), ec);
+                if (ec || size < 0x800 || size > 0xffffffffull) continue;
+                std::ifstream in(cane::paths::ioPath(path), std::ios::binary);
+                char magic[4]{};
+                if (!in.read(magic, 4) || std::memcmp(magic, " KPV", 4)) continue;
+                const auto sector = IsectorExternal(cane::utf8(path));
+                m_veniceMusic[{mw.isector, id}] = FK{sector, uint32_t(size), uint32_t(id)};
+                std::printf("Venice: registered local music %d: %s\n", id, cane::utf8(path).c_str());
+            }
+        }
+
         std::printf("mods: package %s: new world \"%s\" (from %s)\n", m.id.c_str(), w.name.c_str(), w.templateWorld.empty() ? "its own parts" : w.templateWorld.c_str());
         m_amodworld.push_back(std::move(mw));
     }
     for (const std::string& e : aerr) std::fprintf(stderr, "mods: package %s\n", e.c_str());
+}
+
+FK CDisc::FkVeniceMusic(uint32_t worldSector, int musicId) const
+{
+    const auto it = m_veniceMusic.find({worldSector, musicId});
+    return it == m_veniceMusic.end() ? FK{} : it->second;
 }
 
 uint32_t CDisc::IsectorModWorldOf(const std::string& package, const std::string& id) const
