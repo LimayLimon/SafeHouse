@@ -301,6 +301,7 @@ bool CDisc::FOpenConverted(const std::string& dir, std::string& error)
         m_mpCutsceneRule.clear();
         m_amodworld.clear();
         m_veniceMusic.clear();
+        m_veniceAmbience.clear();
         m_amapstate.clear();
         m_aentry.clear();
         m_aguest.erase(std::remove_if(m_aguest.begin(), m_aguest.end(), [](const cane::mods::Guest& g) { return g.id.rfind("cli-", 0) != 0; }), m_aguest.end());
@@ -515,7 +516,34 @@ void CDisc::AddPackageWorlds(const cane::mods::Manifest& m)
         // Custom Venice audio, kept separate from the installed music table.
         if (w.name == "Venice")
         {
-            const auto musicDir = (m.filesDir() / cane::path(w.index)).parent_path() / "Music";
+            const auto worldDir = (m.filesDir() / cane::path(w.index)).parent_path();
+            const auto ambiencePath = worldDir / "Ambience.vpk";
+            {
+                std::error_code ec;
+                if (std::filesystem::is_regular_file(cane::paths::ioPath(ambiencePath), ec) && !ec)
+                {
+                    const auto size = std::filesystem::file_size(cane::paths::ioPath(ambiencePath), ec);
+                    if (!ec && size >= 0x800 && size <= 0xffffffffull)
+                    {
+                        std::ifstream in(cane::paths::ioPath(ambiencePath), std::ios::binary);
+                        uint8_t h[0x800]{};
+                        if (in.read(reinterpret_cast<char*>(h), sizeof(h)) &&
+                            std::memcmp(h, " KPV", 4) == 0 && Le32(h + 0xC) == 0x2000 &&
+                            Le32(h + 0x14) == 3 && Le32(h + 0x10) != 0 &&
+                            h[0x19] == 0 && h[0x1D] == 1 && h[0x21] == 2 &&
+                            Le32(h + 8) >= sizeof(h) &&
+                            uint64_t(Le32(h + 8)) + uint64_t(Le32(h + 4)) * 3 <= size)
+                        {
+                            const auto sector = IsectorExternal(cane::utf8(ambiencePath));
+                            m_veniceAmbience[mw.isector] = FK{sector, uint32_t(size), 240};
+                            std::printf("Venice: registered local ambience: %s\n", cane::utf8(ambiencePath).c_str());
+                        }
+                    }
+                }
+                if (m_veniceAmbience.find(mw.isector) == m_veniceAmbience.end())
+                    std::fprintf(stderr, "Venice: local Ambience.vpk absent or invalid; using template ambience\n");
+            }
+            const auto musicDir = worldDir / "Music";
             for (const int id : {0, 6, 28, 46, 48, 49})
             {
                 const auto path = musicDir / (std::to_string(id) + ".vpk");
@@ -542,6 +570,12 @@ FK CDisc::FkVeniceMusic(uint32_t worldSector, int musicId) const
 {
     const auto it = m_veniceMusic.find({worldSector, musicId});
     return it == m_veniceMusic.end() ? FK{} : it->second;
+}
+
+FK CDisc::FkVeniceAmbience(uint32_t worldSector) const
+{
+    const auto it = m_veniceAmbience.find(worldSector);
+    return it == m_veniceAmbience.end() ? FK{} : it->second;
 }
 
 uint32_t CDisc::IsectorModWorldOf(const std::string& package, const std::string& id) const

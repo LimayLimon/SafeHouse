@@ -130,6 +130,7 @@ public:
     // The sector of the world file named name (the manifest's names, a new world's name); 0: none.
     [[nodiscard]] uint32_t IsectorOfWorldName(const std::string& name) const;
     [[nodiscard]] FK FkVeniceMusic(uint32_t worldSector, int musicId) const;
+    [[nodiscard]] FK FkVeniceAmbience(uint32_t worldSector) const;
     // The shared languages folder (langstore.h; before FOpen; empty: none): manifest paths "@languages/<rest>" are
     // <dir>/<rest> (the languages an installation keeps there, shared with the other regions' installations).
     void SetLanguagesDirectory(const std::string& dir) { m_dirLanguages = dir; }
@@ -260,6 +261,7 @@ private:
     std::map<std::pair<std::string, int>, std::pair<std::string, cane::mods::CutsceneRule>> m_mpCutsceneRule;   // (world, script) -> package, rule
     std::vector<MODWORLD> m_amodworld;
     std::map<std::pair<uint32_t, int>, FK> m_veniceMusic;
+    std::map<uint32_t, FK> m_veniceAmbience;
     std::vector<std::pair<std::string, cane::mods::MapState>> m_amapstate;   // (package id, state)
     std::vector<cane::mods::Entry> m_aentry;
     std::vector<cane::mods::Guest> m_aguest;

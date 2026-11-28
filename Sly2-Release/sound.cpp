@@ -963,16 +963,29 @@ void LoadMusicFromBrx(CBinaryInputStream* pbis)
         if (idx >= 0 && idx < m) s.aisoundFromId[idx] = i;
     }
     const int nt = pbis->S16Read();
-    if (nt > 0)
+    // Read the template's block unchanged, but select Venice's resident stream
+    // for the live Venice world only. Kept guest worlds retain their own records.
+    const FK localAmbience = fKept ? FK{} : g_disc.FkVeniceAmbience(g_isectorWorldLoading);
+    if (nt > 0 || localAmbience.cb != 0)
     {
         if (s.president) s_apresidentOld.push_back(std::move(s.president));
         s.president = std::make_unique<SNDSTREAM>();
-        pbis->ReadRecord64(s.president->key, KEYK_Ambience);  // 0x118458
-        s.president->fk = FkFromRecord(s.president->key);
+        if (nt > 0)
+        {
+            pbis->ReadRecord64(s.president->key, KEYK_Ambience);  // 0x118458
+            s.president->fk = FkFromRecord(s.president->key);
+        }
+        if (localAmbience.cb != 0) s.president->fk = localAmbience;
         if (!fKept) s.sndResident = CSndRef(PsndNewVoice(s.president.get(), 4));
     }
     s.aidTarget.clear();
     for (int i = 0; i < nt; ++i) s.aidTarget.push_back(pbis->S16Read());
+    if (localAmbience.cb != 0)
+    {
+        // Original v_ext Sound.bin: VPK groups 0, 1, 2 correspond to targets 61, 62, 63.
+        s.aidTarget = {61, 62, 63};
+        std::printf("Venice: using local resident ambience (targets 61, 62, 63)\n");
+    }
     const int nl = pbis->U8Read();
     int sel = 0;
     s.alanguage.clear();
